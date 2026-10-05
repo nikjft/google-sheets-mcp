@@ -21,7 +21,7 @@
  */
 
 export default {
-  async fetch(request) {
+  async fetch(request, env, ctx) {
     // --- CORS preflight ---
     if (request.method === "OPTIONS") {
       return new Response(null, {
@@ -53,7 +53,39 @@ export default {
       gasPath = `${gasPath}/exec`;
     }
 
-    const targetUrl = `https://script.google.com/macros/s/${gasPath}${url.search}`;
+    const targetUrl = new URL(`https://script.google.com/macros/s/${gasPath}`);
+    
+    // Copy incoming query params
+    for (const [k, v] of url.searchParams) {
+      targetUrl.searchParams.set(k, v);
+    }
+
+    // Extract auth token from Authorization header or x-api-key if not already in query params
+    if (
+      !targetUrl.searchParams.has("apiKey") &&
+      !targetUrl.searchParams.has("key") &&
+      !targetUrl.searchParams.has("token")
+    ) {
+      const authHeader =
+        request.headers.get("authorization") ||
+        request.headers.get("Authorization");
+      if (authHeader) {
+        const match = authHeader.match(/^Bearer\s+(.+)$/i);
+        const token = match ? match[1].trim() : authHeader.trim();
+        if (token) {
+          targetUrl.searchParams.set("apiKey", token);
+        }
+      }
+      const xApiKey =
+        request.headers.get("x-api-key") || request.headers.get("X-API-Key");
+      if (xApiKey && !targetUrl.searchParams.has("apiKey")) {
+        targetUrl.searchParams.set("apiKey", xApiKey.trim());
+      }
+      // If configured in Cloudflare Worker env (e.g. env.API_KEY)
+      if (env && env.API_KEY && !targetUrl.searchParams.has("apiKey")) {
+        targetUrl.searchParams.set("apiKey", env.API_KEY.trim());
+      }
+    }
 
     try {
       // --- Forward the request to GAS ---
