@@ -179,13 +179,25 @@ To simplify setup, onboarding, key rotation, and maintenance directly from the s
 - Prompts for confirmation to prevent accidental client disruption.
 - Generates a new secure key, updates `ScriptProperties`, and displays the refreshed key dialog.
 
-### 4. `🛠️ Setup System Columns` (`menuSetupSystemColumnsActiveSheet` & `menuSetupSystemColumnsAllSheets`)
-- Allows the user to select either the active sheet or all sheets.
-- Automatically adds `_uid`, `_created_at`, and `_updated_at` columns if missing.
-- Backfills existing data rows with unique IDs and ISO timestamps.
-- Displays a confirmation summary dialog with the number of columns added and rows backfilled.
+### 4. `✨ Setup Sheet Tracking Wizard` (`menuSheetSetupWizard`)
+- Opens an interactive modal dialog to configure tracking on the active sheet or all sheets.
+- Selectively toggle UID (`_uid`), Last Modified (`_updated_at`), and Created Date (`_created_at`) columns with custom header names and ID prefixes.
+- Configurable options for backfilling existing rows and freezing row 1.
 
-### 5. `📖 Documentation & Connection Guide` (`menuShowDocumentation`)
+### 5. `➕ Add All Tracking Columns` (`menuAddAllTrackingColumns`)
+- Instantly ensures `_uid`, `_updated_at`, and `_created_at` exist on the active sheet.
+- Automatically handles empty sheets by creating header rows.
+- Backfills unique IDs (`rec_...`) and ISO timestamps for all populated rows.
+
+### 6. `⚙️ Individual Column Tools` (Submenu)
+- **`🆔 Add UID Column (_uid)` (`menuAddUidColumn`)**: Appends or verifies UID column and backfills existing rows.
+- **`🕒 Add Updated At Column (_updated_at)` (`menuAddUpdatedAtColumn`)**: Appends or verifies update timestamp column and informs user that subsequent edits automatically refresh it.
+- **`📅 Add Created At Column (_created_at)` (`menuAddCreatedAtColumn`)**: Appends or verifies creation timestamp column.
+- **`🔄 Backfill Missing UIDs Only` (`menuBackfillUids`)**: Scans existing rows for missing UIDs and generates unique identifiers without altering timestamps.
+- **`⏱️ Backfill Missing Timestamps Only` (`menuBackfillTimestamps`)**: Scans existing rows for missing timestamps.
+- **`🌐 Setup System Columns on ALL Sheets` (`menuSetupSystemColumnsAllSheets`)**: Batches system column setup and backfills across all tabs in the spreadsheet.
+
+### 7. `📖 Documentation & Connection Guide` (`menuShowDocumentation`)
 - Opens an interactive reference modal directly inside the spreadsheet.
 - Provides copyable client configuration templates for Claude Desktop, Cursor, Gemini Spark, and HTTP proxy.
 - Lists all 9 registered MCP tools with parameter documentation.

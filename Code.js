@@ -1532,6 +1532,12 @@ function toolSetupSheetSystemColumns(args) {
     const sheet = getSheetOrThrow(ss, args.sheetName);
     const headerRowIndex = Number(args.headerRow) || 1;
 
+    const includeUid = args.includeUid !== false;
+    const includeCreatedAt = args.includeCreatedAt !== false;
+    const includeUpdatedAt = args.includeUpdatedAt !== false;
+    const backfillExisting = args.backfillExisting !== false;
+    const freezeHeader = args.freezeHeader === true;
+
     const idColName = args.idColumnName || "_uid";
     const createdColName = args.createdAtColumnName || "_created_at";
     const updatedColName = args.updatedAtColumnName || "_updated_at";
@@ -1540,41 +1546,79 @@ function toolSetupSheetSystemColumns(args) {
     let lastCol = sheet.getLastColumn();
     const lastRow = sheet.getLastRow();
 
+    const targetCols = [];
+    if (includeUid) targetCols.push(idColName);
+    if (includeCreatedAt) targetCols.push(createdColName);
+    if (includeUpdatedAt) targetCols.push(updatedColName);
+
     if (lastCol === 0) {
-      throw new Error("Cannot setup system columns on an empty sheet without existing headers.");
+      if (targetCols.length === 0) {
+        throw new Error("No columns specified to add on empty sheet.");
+      }
+      sheet.getRange(headerRowIndex, 1, 1, targetCols.length).setValues([targetCols]);
+      sheet.getRange(headerRowIndex, 1, 1, targetCols.length).setFontWeight("bold");
+      if (freezeHeader || sheet.getFrozenRows() === 0) sheet.setFrozenRows(headerRowIndex);
+      SpreadsheetApp.flush();
+      return {
+        success: true,
+        sheetName: sheet.getName(),
+        columnsAdded: targetCols,
+        systemColumns: {
+          idColumn: includeUid ? idColName : null,
+          createdAtColumn: includeCreatedAt ? createdColName : null,
+          updatedAtColumn: includeUpdatedAt ? updatedColName : null
+        },
+        totalRows: 0,
+        rowsBackfilled: 0,
+        message: "Created initial system column headers on empty sheet."
+      };
     }
 
     const rawHeaders = sheet.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
     const existingHeadersLower = rawHeaders.map(h => String(h).trim().toLowerCase());
 
     const columnsToAdd = [];
-    if (!existingHeadersLower.includes(idColName.toLowerCase())) columnsToAdd.push(idColName);
-    if (!existingHeadersLower.includes(createdColName.toLowerCase())) columnsToAdd.push(createdColName);
-    if (!existingHeadersLower.includes(updatedColName.toLowerCase())) columnsToAdd.push(updatedColName);
+    if (includeUid && !existingHeadersLower.includes(idColName.toLowerCase())) columnsToAdd.push(idColName);
+    if (includeCreatedAt && !existingHeadersLower.includes(createdColName.toLowerCase())) columnsToAdd.push(createdColName);
+    if (includeUpdatedAt && !existingHeadersLower.includes(updatedColName.toLowerCase())) columnsToAdd.push(updatedColName);
 
     // Add missing column headers to the right
     if (columnsToAdd.length > 0) {
       const startNewCol = lastCol + 1;
       const headerRange = sheet.getRange(headerRowIndex, startNewCol, 1, columnsToAdd.length);
       headerRange.setValues([columnsToAdd]);
+      headerRange.setFontWeight("bold");
       lastCol += columnsToAdd.length;
+    }
+
+    if (freezeHeader && sheet.getFrozenRows() === 0) {
+      sheet.setFrozenRows(headerRowIndex);
     }
 
     // Refresh headers mapping
     const updatedRawHeaders = sheet.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
-    const idColIdx = updatedRawHeaders.findIndex(h => String(h).trim().toLowerCase() === idColName.toLowerCase()) + 1;
-    const createdColIdx = updatedRawHeaders.findIndex(h => String(h).trim().toLowerCase() === createdColName.toLowerCase()) + 1;
-    const updatedColIdx = updatedRawHeaders.findIndex(h => String(h).trim().toLowerCase() === updatedColName.toLowerCase()) + 1;
+    const idColIdx = includeUid ? (updatedRawHeaders.findIndex(h => String(h).trim().toLowerCase() === idColName.toLowerCase()) + 1) : 0;
+    const createdColIdx = includeCreatedAt ? (updatedRawHeaders.findIndex(h => String(h).trim().toLowerCase() === createdColName.toLowerCase()) + 1) : 0;
+    const updatedColIdx = includeUpdatedAt ? (updatedRawHeaders.findIndex(h => String(h).trim().toLowerCase() === updatedColName.toLowerCase()) + 1) : 0;
 
     const dataRowCount = Math.max(0, lastRow - headerRowIndex);
     let backfilledCount = 0;
 
-    if (dataRowCount > 0) {
+    if (dataRowCount > 0 && backfillExisting) {
       const nowIso = new Date().toISOString();
       const entireDataRange = sheet.getRange(headerRowIndex + 1, 1, dataRowCount, lastCol);
       const dataValues = entireDataRange.getValues();
 
       for (let r = 0; r < dataRowCount; r++) {
+        // Verify row has at least some content
+        const hasContent = dataValues[r].some((val, idx) => {
+          const colNum = idx + 1;
+          if (colNum === idColIdx || colNum === createdColIdx || colNum === updatedColIdx) return false;
+          return val !== "" && val !== null && val !== undefined;
+        });
+
+        if (!hasContent) continue;
+
         let modified = false;
 
         // Check UID
@@ -1619,9 +1663,9 @@ function toolSetupSheetSystemColumns(args) {
       sheetName: sheet.getName(),
       columnsAdded: columnsToAdd,
       systemColumns: {
-        idColumn: idColName,
-        createdAtColumn: createdColName,
-        updatedAtColumn: updatedColName
+        idColumn: idColIdx > 0 ? idColName : null,
+        createdAtColumn: createdColIdx > 0 ? createdColName : null,
+        updatedAtColumn: updatedColIdx > 0 ? updatedColName : null
       },
       totalRows: dataRowCount,
       rowsBackfilled: backfilledCount
@@ -2189,11 +2233,21 @@ function onOpen(e) {
     ui.createMenu("🤖 MCP Server")
       .addItem("🚀 Run Diagnostics & Test Auth", "menuRunDiagnostics")
       .addSeparator()
+      .addItem("✨ Setup Sheet Tracking Wizard...", "menuSheetSetupWizard")
+      .addItem("➕ Add All Tracking Columns (_uid, _updated_at, _created_at)", "menuAddAllTrackingColumns")
+      .addSubMenu(ui.createMenu("⚙️ Individual Column Tools")
+        .addItem("🆔 Add UID Column (_uid)", "menuAddUidColumn")
+        .addItem("🕒 Add Updated At Column (_updated_at)", "menuAddUpdatedAtColumn")
+        .addItem("📅 Add Created At Column (_created_at)", "menuAddCreatedAtColumn")
+        .addSeparator()
+        .addItem("🔄 Backfill Missing UIDs Only", "menuBackfillUids")
+        .addItem("⏱️ Backfill Missing Timestamps Only", "menuBackfillTimestamps")
+        .addSeparator()
+        .addItem("🌐 Setup System Columns on ALL Sheets", "menuSetupSystemColumnsAllSheets")
+      )
+      .addSeparator()
       .addItem("🔑 View / Copy API Key", "menuShowApiKey")
       .addItem("🔄 Re-generate API Key", "menuRegenerateApiKey")
-      .addSeparator()
-      .addItem("🛠️ Setup System Columns (Active Sheet)", "menuSetupSystemColumnsActiveSheet")
-      .addItem("🛠️ Setup System Columns (All Sheets)", "menuSetupSystemColumnsAllSheets")
       .addSeparator()
       .addItem("📖 Documentation & Connection Guide", "menuShowDocumentation")
       .addToUi();
@@ -2461,34 +2515,487 @@ function menuRegenerateApiKey() {
 }
 
 /**
- * Menu Action: Setup System Columns on Active Sheet
+ * Helper to escape HTML characters
  */
-function menuSetupSystemColumnsActiveSheet() {
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/**
+ * Menu Action: Setup Sheet Tracking Wizard (Interactive Modal Dialog)
+ */
+function menuSheetSetupWizard() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const activeSheet = SpreadsheetApp.getActiveSheet();
+  const activeSheetName = activeSheet.getName();
+  const allSheets = ss.getSheets().map(s => s.getName());
+
+  const sheetOptionsHtml = allSheets.map(name => {
+    const selected = name === activeSheetName ? " selected" : "";
+    return `<option value="${escapeHtml(name)}"${selected}>${escapeHtml(name)}</option>`;
+  }).join("");
+
+  const html = `
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f1f5f9; padding: 16px; margin: 0; }
+      h3 { margin: 0 0 12px 0; font-size: 15px; color: #60a5fa; }
+      .field { margin-bottom: 12px; }
+      label.title { display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 6px; }
+      select, input[type="text"] { width: 100%; box-sizing: border-box; background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 7px 10px; color: #38bdf8; font-family: inherit; font-size: 13px; outline: none; }
+      .checkbox-group { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+      .check-item { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; font-size: 13px; }
+      .check-item:last-child { margin-bottom: 0; }
+      .check-left { display: flex; align-items: center; gap: 8px; }
+      input[type="checkbox"] { accent-color: #3b82f6; width: 16px; height: 16px; cursor: pointer; }
+      .col-name-input { width: 130px !important; font-family: monospace !important; font-size: 12px !important; padding: 4px 6px !important; }
+      .btn-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+      button { padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; border: none; }
+      button.btn-primary { background: #3b82f6; color: white; }
+      button.btn-primary:hover { background: #2563eb; }
+      button.btn-secondary { background: #334155; color: #cbd5e1; }
+      button.btn-secondary:hover { background: #475569; }
+      #statusArea { font-size: 12px; margin-top: 10px; min-height: 20px; }
+      .status-ok { color: #86efac; font-weight: 600; }
+      .status-err { color: #f87171; font-weight: 600; }
+    </style>
+    <h3>🛠️ Setup System Tracking Columns</h3>
+    <div class="field">
+      <label class="title">Target Sheet</label>
+      <select id="targetSheet">
+        ${sheetOptionsHtml}
+        <option value="__ALL__">🌐 ALL Sheets in Spreadsheet</option>
+      </select>
+    </div>
+
+    <label class="title">Tracking Columns to Add / Ensure</label>
+    <div class="checkbox-group">
+      <div class="check-item">
+        <label class="check-left">
+          <input type="checkbox" id="chkUid" checked />
+          <span><strong>🆔 Unique Record ID</strong></span>
+        </label>
+        <input type="text" id="nameUid" class="col-name-input" value="_uid" title="Column Header Name" />
+      </div>
+      <div class="check-item">
+        <label class="check-left">
+          <input type="checkbox" id="chkUpdated" checked />
+          <span><strong>🕒 Last Modified Timestamp</strong></span>
+        </label>
+        <input type="text" id="nameUpdated" class="col-name-input" value="_updated_at" title="Column Header Name" />
+      </div>
+      <div class="check-item">
+        <label class="check-left">
+          <input type="checkbox" id="chkCreated" checked />
+          <span><strong>📅 Created Timestamp</strong></span>
+        </label>
+        <input type="text" id="nameCreated" class="col-name-input" value="_created_at" title="Column Header Name" />
+      </div>
+    </div>
+
+    <div class="checkbox-group" style="padding: 10px 12px;">
+      <div class="check-item" style="margin-bottom: 8px;">
+        <label class="check-left">
+          <input type="checkbox" id="chkBackfill" checked />
+          <span>🔄 Backfill existing rows with unique IDs & timestamps</span>
+        </label>
+      </div>
+      <div class="check-item">
+        <label class="check-left">
+          <input type="checkbox" id="chkFreeze" checked />
+          <span>📌 Freeze header row (Row 1)</span>
+        </label>
+      </div>
+    </div>
+
+    <div id="statusArea"></div>
+
+    <div class="btn-bar">
+      <button class="btn-secondary" onclick="google.script.host.close()">Cancel</button>
+      <button class="btn-primary" id="btnApply" onclick="applySetup()">Apply Setup</button>
+    </div>
+
+    <script>
+      function applySetup() {
+        var btn = document.getElementById("btnApply");
+        var status = document.getElementById("statusArea");
+        btn.disabled = true;
+        btn.innerText = "Applying...";
+        status.innerHTML = '<span style="color: #60a5fa;">⏳ Configuring columns and backfilling rows...</span>';
+
+        var config = {
+          sheetName: document.getElementById("targetSheet").value,
+          includeUid: document.getElementById("chkUid").checked,
+          idColumnName: document.getElementById("nameUid").value.trim() || "_uid",
+          includeUpdatedAt: document.getElementById("chkUpdated").checked,
+          updatedAtColumnName: document.getElementById("nameUpdated").value.trim() || "_updated_at",
+          includeCreatedAt: document.getElementById("chkCreated").checked,
+          createdAtColumnName: document.getElementById("nameCreated").value.trim() || "_created_at",
+          backfillExisting: document.getElementById("chkBackfill").checked,
+          freezeHeader: document.getElementById("chkFreeze").checked
+        };
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            btn.disabled = false;
+            btn.innerText = "Done";
+            status.innerHTML = '<span class="status-ok">✓ ' + (res.message || 'Setup applied successfully!') + '</span>';
+            setTimeout(function() { google.script.host.close(); }, 2200);
+          })
+          .withFailureHandler(function(err) {
+            btn.disabled = false;
+            btn.innerText = "Retry";
+            status.innerHTML = '<span class="status-err">❌ Error: ' + err.message + '</span>';
+          })
+          .applySheetSetupFromWizard(config);
+      }
+    </script>
+  `;
+
+  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(490).setHeight(470);
+  ui.showModalDialog(htmlOutput, "✨ Sheet Tracking Setup Wizard");
+}
+
+/**
+ * Server-side handler for the setup wizard modal.
+ */
+function applySheetSetupFromWizard(config) {
+  if (config.sheetName === "__ALL__") {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheets = ss.getSheets();
+    let totalColsAdded = 0;
+    let totalBackfilled = 0;
+    const sheetResults = [];
+
+    for (const s of sheets) {
+      const sName = s.getName();
+      const res = toolSetupSheetSystemColumns({
+        sheetName: sName,
+        includeUid: config.includeUid,
+        idColumnName: config.idColumnName,
+        includeUpdatedAt: config.includeUpdatedAt,
+        updatedAtColumnName: config.updatedAtColumnName,
+        includeCreatedAt: config.includeCreatedAt,
+        createdAtColumnName: config.createdAtColumnName,
+        backfillExisting: config.backfillExisting,
+        freezeHeader: config.freezeHeader
+      });
+      totalColsAdded += (res.columnsAdded || []).length;
+      totalBackfilled += (res.rowsBackfilled || 0);
+      sheetResults.push(sName);
+    }
+    return {
+      success: true,
+      message: "Configured " + sheetResults.length + " sheets (Added " + totalColsAdded + " columns, backfilled " + totalBackfilled + " rows)."
+    };
+  } else {
+    const res = toolSetupSheetSystemColumns({
+      sheetName: config.sheetName,
+      includeUid: config.includeUid,
+      idColumnName: config.idColumnName,
+      includeUpdatedAt: config.includeUpdatedAt,
+      updatedAtColumnName: config.updatedAtColumnName,
+      includeCreatedAt: config.includeCreatedAt,
+      createdAtColumnName: config.createdAtColumnName,
+      backfillExisting: config.backfillExisting,
+      freezeHeader: config.freezeHeader
+    });
+    const addedStr = (res.columnsAdded && res.columnsAdded.length > 0) ? res.columnsAdded.join(", ") : "None (already existed)";
+    return {
+      success: true,
+      message: "Sheet '" + config.sheetName + "': added [" + addedStr + "], backfilled " + res.rowsBackfilled + " rows."
+    };
+  }
+}
+
+/**
+ * Menu Action: Add All Tracking Columns (_uid, _updated_at, _created_at) to Active Sheet
+ */
+function menuAddAllTrackingColumns() {
   const ui = SpreadsheetApp.getUi();
   const sheet = SpreadsheetApp.getActiveSheet();
   const sheetName = sheet.getName();
 
-  const confirm = ui.alert(
-    "Setup System Columns",
-    "This will ensure columns '_uid', '_created_at', and '_updated_at' exist on sheet '" + sheetName + "', and backfill unique IDs and timestamps for existing rows.\n\nProceed?",
-    ui.ButtonSet.YES_NO
-  );
-
-  if (confirm !== ui.Button.YES) return;
-
   try {
-    const result = toolSetupSheetSystemColumns({ sheetName: sheetName });
+    const result = toolSetupSheetSystemColumns({
+      sheetName: sheetName,
+      includeUid: true,
+      includeUpdatedAt: true,
+      includeCreatedAt: true,
+      freezeHeader: true,
+      backfillExisting: true
+    });
+
     const addedMsg = result.columnsAdded.length > 0 ? result.columnsAdded.join(", ") : "None (already existed)";
     ui.alert(
-      "System Columns Configured",
+      "All Tracking Columns Configured",
       "Sheet: " + sheetName +
       "\nColumns Added: " + addedMsg +
-      "\nRows Backfilled: " + result.rowsBackfilled + " of " + result.totalRows,
+      "\nRows Backfilled: " + result.rowsBackfilled + " of " + result.totalRows +
+      "\n\nNote: The onEdit trigger will automatically maintain UIDs and update timestamps when rows are edited.",
       ui.ButtonSet.OK
     );
   } catch (err) {
     ui.alert("Error", "Failed to setup system columns: " + err.message, ui.ButtonSet.OK);
   }
+}
+
+/**
+ * Menu Action: Add UID Column (_uid) to Active Sheet
+ */
+function menuAddUidColumn() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const sheetName = sheet.getName();
+
+  try {
+    const result = toolSetupSheetSystemColumns({
+      sheetName: sheetName,
+      includeUid: true,
+      includeUpdatedAt: false,
+      includeCreatedAt: false,
+      backfillExisting: true
+    });
+
+    const added = result.columnsAdded.includes("_uid");
+    ui.alert(
+      "UID Column Status",
+      "Sheet: " + sheetName +
+      (added ? "\nAdded Column: _uid" : "\nColumn '_uid' already existed.") +
+      "\nRows Backfilled: " + result.rowsBackfilled + " of " + result.totalRows,
+      ui.ButtonSet.OK
+    );
+  } catch (err) {
+    ui.alert("Error", "Failed to add UID column: " + err.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Menu Action: Add Updated At Column (_updated_at) to Active Sheet
+ */
+function menuAddUpdatedAtColumn() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const sheetName = sheet.getName();
+
+  try {
+    const result = toolSetupSheetSystemColumns({
+      sheetName: sheetName,
+      includeUid: false,
+      includeUpdatedAt: true,
+      includeCreatedAt: false,
+      backfillExisting: true
+    });
+
+    const added = result.columnsAdded.includes("_updated_at");
+    ui.alert(
+      "Updated At Column Status",
+      "Sheet: " + sheetName +
+      (added ? "\nAdded Column: _updated_at" : "\nColumn '_updated_at' already existed.") +
+      "\nRows Backfilled: " + result.rowsBackfilled + " of " + result.totalRows +
+      "\n\nNote: Edits to this sheet will now automatically update the '_updated_at' timestamp on the modified row.",
+      ui.ButtonSet.OK
+    );
+  } catch (err) {
+    ui.alert("Error", "Failed to add Updated At column: " + err.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Menu Action: Add Created At Column (_created_at) to Active Sheet
+ */
+function menuAddCreatedAtColumn() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const sheetName = sheet.getName();
+
+  try {
+    const result = toolSetupSheetSystemColumns({
+      sheetName: sheetName,
+      includeUid: false,
+      includeUpdatedAt: false,
+      includeCreatedAt: true,
+      backfillExisting: true
+    });
+
+    const added = result.columnsAdded.includes("_created_at");
+    ui.alert(
+      "Created At Column Status",
+      "Sheet: " + sheetName +
+      (added ? "\nAdded Column: _created_at" : "\nColumn '_created_at' already existed.") +
+      "\nRows Backfilled: " + result.rowsBackfilled + " of " + result.totalRows,
+      ui.ButtonSet.OK
+    );
+  } catch (err) {
+    ui.alert("Error", "Failed to add Created At column: " + err.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Menu Action: Backfill Missing UIDs on Active Sheet
+ */
+function menuBackfillUids() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const sheetName = sheet.getName();
+
+  try {
+    const lastCol = sheet.getLastColumn();
+    const lastRow = sheet.getLastRow();
+    if (lastCol === 0 || lastRow <= 1) {
+      ui.alert("Backfill UIDs", "No data rows found on sheet '" + sheetName + "'.", ui.ButtonSet.OK);
+      return;
+    }
+
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    let uidColIdx = -1;
+    for (let c = 0; c < headers.length; c++) {
+      const h = String(headers[c]).trim().toLowerCase();
+      if (h === "_uid" || h === "uid" || h === "id") {
+        uidColIdx = c + 1;
+        break;
+      }
+    }
+
+    if (uidColIdx === -1) {
+      const ask = ui.alert(
+        "No UID Column Found",
+        "Sheet '" + sheetName + "' does not have a UID column (_uid).\n\nWould you like to add the '_uid' column and backfill all rows now?",
+        ui.ButtonSet.YES_NO
+      );
+      if (ask === ui.Button.YES) {
+        menuAddUidColumn();
+      }
+      return;
+    }
+
+    const dataRowCount = lastRow - 1;
+    const uidRange = sheet.getRange(2, uidColIdx, dataRowCount, 1);
+    const uidValues = uidRange.getValues();
+    let backfilled = 0;
+
+    for (let r = 0; r < dataRowCount; r++) {
+      const val = uidValues[r][0];
+      if (!val || String(val).trim() === "") {
+        uidValues[r][0] = "rec_" + Utilities.getUuid().substring(0, 8);
+        backfilled++;
+      }
+    }
+
+    if (backfilled > 0) {
+      uidRange.setValues(uidValues);
+      SpreadsheetApp.flush();
+    }
+
+    ui.alert(
+      "UID Backfill Complete",
+      "Sheet: " + sheetName +
+      "\nRows Checked: " + dataRowCount +
+      "\nMissing UIDs Backfilled: " + backfilled,
+      ui.ButtonSet.OK
+    );
+  } catch (err) {
+    ui.alert("Error", "Error backfilling UIDs: " + err.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Menu Action: Backfill Missing Timestamps on Active Sheet
+ */
+function menuBackfillTimestamps() {
+  const ui = SpreadsheetApp.getUi();
+  const sheet = SpreadsheetApp.getActiveSheet();
+  const sheetName = sheet.getName();
+
+  try {
+    const lastCol = sheet.getLastColumn();
+    const lastRow = sheet.getLastRow();
+    if (lastCol === 0 || lastRow <= 1) {
+      ui.alert("Backfill Timestamps", "No data rows found on sheet '" + sheetName + "'.", ui.ButtonSet.OK);
+      return;
+    }
+
+    const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    let createdColIdx = -1;
+    let updatedColIdx = -1;
+
+    for (let c = 0; c < headers.length; c++) {
+      const h = String(headers[c]).trim().toLowerCase();
+      if (createdColIdx === -1 && (h === "_created_at" || h === "created_at" || h === "created at" || h === "created date")) {
+        createdColIdx = c + 1;
+      }
+      if (updatedColIdx === -1 && (h === "_updated_at" || h === "updated_at" || h === "updated at" || h === "edited date" || h === "last modified")) {
+        updatedColIdx = c + 1;
+      }
+    }
+
+    if (createdColIdx === -1 && updatedColIdx === -1) {
+      const ask = ui.alert(
+        "No Timestamp Columns Found",
+        "Sheet '" + sheetName + "' does not have '_created_at' or '_updated_at' columns.\n\nWould you like to add tracking columns now?",
+        ui.ButtonSet.YES_NO
+      );
+      if (ask === ui.Button.YES) {
+        menuAddAllTrackingColumns();
+      }
+      return;
+    }
+
+    const dataRowCount = lastRow - 1;
+    const nowIso = new Date().toISOString();
+    let createdFilled = 0;
+    let updatedFilled = 0;
+
+    if (createdColIdx !== -1) {
+      const rng = sheet.getRange(2, createdColIdx, dataRowCount, 1);
+      const vals = rng.getValues();
+      for (let r = 0; r < dataRowCount; r++) {
+        if (!vals[r][0] || String(vals[r][0]).trim() === "") {
+          vals[r][0] = nowIso;
+          createdFilled++;
+        }
+      }
+      if (createdFilled > 0) rng.setValues(vals);
+    }
+
+    if (updatedColIdx !== -1) {
+      const rng = sheet.getRange(2, updatedColIdx, dataRowCount, 1);
+      const vals = rng.getValues();
+      for (let r = 0; r < dataRowCount; r++) {
+        if (!vals[r][0] || String(vals[r][0]).trim() === "") {
+          vals[r][0] = nowIso;
+          updatedFilled++;
+        }
+      }
+      if (updatedFilled > 0) rng.setValues(vals);
+    }
+
+    SpreadsheetApp.flush();
+
+    ui.alert(
+      "Timestamp Backfill Complete",
+      "Sheet: " + sheetName +
+      "\nRows Checked: " + dataRowCount +
+      "\nCreated Timestamps Filled: " + createdFilled +
+      "\nUpdated Timestamps Filled: " + updatedFilled,
+      ui.ButtonSet.OK
+    );
+  } catch (err) {
+    ui.alert("Error", "Error backfilling timestamps: " + err.message, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Menu Action: Setup System Columns on Active Sheet (Legacy backward compatibility)
+ */
+function menuSetupSystemColumnsActiveSheet() {
+  menuAddAllTrackingColumns();
 }
 
 /**
@@ -2511,10 +3018,8 @@ function menuSetupSystemColumnsAllSheets() {
 
     for (const s of sheets) {
       const sName = s.getName();
-      if (s.getLastColumn() > 0) {
-        const res = toolSetupSheetSystemColumns({ sheetName: sName });
-        summary.push(sName + ": added [" + (res.columnsAdded.join(", ") || "none") + "], backfilled " + res.rowsBackfilled + " rows");
-      }
+      const res = toolSetupSheetSystemColumns({ sheetName: sName });
+      summary.push(sName + ": added [" + (res.columnsAdded.join(", ") || "none") + "], backfilled " + res.rowsBackfilled + " rows");
     }
 
     ui.alert("All Sheets Configured", summary.join("\n"), ui.ButtonSet.OK);
