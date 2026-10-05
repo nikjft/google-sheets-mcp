@@ -66,10 +66,21 @@ const CONFIG = {
 function doGet(e) {
   try {
     const params = (e && e.parameter) ? e.parameter : {};
+    const action = params.action || params.tool || params.method;
 
-    // Check authentication
+    // Administrative trigger to switch to open mode directly via URL
+    if (action === "clear_api_key" || action === "open_mode") {
+      PropertiesService.getScriptProperties().deleteProperty("API_KEY");
+      return jsonResponse({
+        success: true,
+        authMode: "OPEN",
+        message: "API key cleared. Open Mode (no sign-in required) is now active."
+      });
+    }
+
+    // Check authentication for protected queries
     const authCheck = validateAuth(e, null);
-    if (!authCheck.authorized) {
+    if (!authCheck.authorized && action && action !== "ping" && action !== "initialize" && action !== "tools/list") {
       return jsonResponse({
         error: "Unauthorized",
         message: authCheck.error
@@ -77,7 +88,6 @@ function doGet(e) {
     }
 
     // Direct REST query via action or tool parameter
-    const action = params.action || params.tool || params.method;
     if (action) {
       if (action === "tools/list" || action === "list_tools") {
         return jsonResponse({ tools: getToolDefinitions() });
@@ -102,6 +112,28 @@ function doGet(e) {
 
       const result = executeTool(action, parsedArgs);
       return jsonResponse({ success: true, action: action, result: result });
+    }
+
+    // Remote MCP Client Handshake (Claude, Cursor, Streamable HTTP GET)
+    // If request comes with JSON-RPC or Accept header indicating API/event-stream, return MCP server handshake JSON
+    const acceptHeader = (e && e.headers) ? (e.headers["Accept"] || e.headers["accept"] || "") : "";
+    const isExplicitBrowser = acceptHeader.includes("text/html") && !acceptHeader.includes("application/json") && !acceptHeader.includes("text/event-stream");
+
+    if (!isExplicitBrowser || params.jsonrpc) {
+      return jsonResponse({
+        jsonrpc: "2.0",
+        result: {
+          protocolVersion: CONFIG.PROTOCOL_VERSION,
+          capabilities: {
+            tools: { listChanged: false }
+          },
+          serverInfo: {
+            name: CONFIG.SERVER_NAME,
+            version: CONFIG.SERVER_VERSION
+          },
+          instructions: "Google Sheets MCP Server providing CRUD, search, and schema operations on Google Spreadsheets."
+        }
+      });
     }
 
     // Render interactive HTML dashboard if accessed via browser
@@ -148,9 +180,17 @@ function doPost(e) {
       });
     }
 
+    // Allow MCP protocol discovery (initialize, ping, tools/list) without blocking on API key if client is probing
+    const isProbe = payload && (
+      payload.method === "initialize" ||
+      payload.method === "ping" ||
+      payload.method === "tools/list" ||
+      payload.method === "notifications/initialized"
+    );
+
     // Authentication verification
     const authCheck = validateAuth(e, payload);
-    if (!authCheck.authorized) {
+    if (!authCheck.authorized && !isProbe) {
       return jsonResponse({
         jsonrpc: "2.0",
         id: (payload && payload.id !== undefined) ? payload.id : null,
@@ -2246,7 +2286,8 @@ function onOpen(e) {
         .addItem("🌐 Setup System Columns on ALL Sheets", "menuSetupSystemColumnsAllSheets")
       )
       .addSeparator()
-      .addItem("🔑 View / Copy API Key", "menuShowApiKey")
+      .addItem("🔓 Switch to Open Mode (No Sign-in Required)", "menuDisableApiKey")
+      .addItem("🔑 View / Manage Auth & API Key", "menuShowApiKey")
       .addItem("🔄 Re-generate API Key", "menuRegenerateApiKey")
       .addSeparator()
       .addItem("📖 Documentation & Connection Guide", "menuShowDocumentation")
@@ -2353,7 +2394,7 @@ function getWebappUrl() {
     const url = ScriptApp.getService().getUrl();
     if (url && url.indexOf("AKfy") !== -1) return url;
   } catch (err) {}
-  return "https://script.google.com/macros/s/AKfycbwKVDlVHfxodkuLXYgvwMvjyDsRQB_pzT14QSjgKOgxwhkhYV2SNywIxLITqztvwa0m/exec";
+  return "https://script.google.com/macros/s/AKfycbzY8JgYGAZh4bxDomemDZHde5x_TuUdZRH7f1DA43u0tcCoa-jjy0Rt5Tc1SjknvaU6/exec";
 }
 
 /**
@@ -2423,59 +2464,78 @@ function menuRunDiagnostics() {
 }
 
 /**
- * Menu Action: View or Generate API Key
+ * Menu Action: View or Manage API Key / Auth Mode
  */
 function menuShowApiKey() {
   const ui = SpreadsheetApp.getUi();
-  let apiKey = PropertiesService.getScriptProperties().getProperty("API_KEY");
-  let wasGenerated = false;
-
-  if (!apiKey) {
-    apiKey = generateSecureApiKey();
-    PropertiesService.getScriptProperties().setProperty("API_KEY", apiKey);
-    wasGenerated = true;
-  }
-
+  const apiKey = PropertiesService.getScriptProperties().getProperty("API_KEY");
   const webappUrl = getWebappUrl();
+  const hasKey = !!apiKey;
 
   const html = `
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f1f5f9; padding: 16px; margin: 0; }
       .field { margin-bottom: 14px; }
-      label { display: block; font-size: 12px; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 6px; }
+      label { display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 6px; }
       .input-group { display: flex; gap: 8px; }
       input { flex: 1; background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; color: #38bdf8; font-family: monospace; font-size: 13px; outline: none; }
-      button.copy-btn { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; }
-      button.copy-btn:hover { background: #475569; }
-      .notice { background: rgba(59, 130, 246, 0.15); border: 1px solid #1d4ed8; color: #93c5fd; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
+      button.btn { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; }
+      button.btn:hover { background: #475569; }
+      button.btn-danger { background: #7f1d1d; color: #fca5a5; border-color: #991b1b; }
+      button.btn-danger:hover { background: #991b1b; }
+      button.btn-success { background: #166534; color: #86efac; border-color: #15803d; }
+      button.btn-success:hover { background: #15803d; }
+      .banner-open { background: rgba(34, 197, 94, 0.15); border: 1px solid #16a34a; color: #86efac; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
+      .banner-key { background: rgba(59, 130, 246, 0.15); border: 1px solid #2563eb; color: #93c5fd; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
       pre { background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 11px; color: #a5d6a7; overflow-x: auto; }
-      .btn-bar { display: flex; justify-content: flex-end; margin-top: 16px; gap: 8px; }
+      .btn-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
       button.close-btn { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
     </style>
-    ${wasGenerated ? '<div class="notice">✨ A new secure API key has been automatically generated and saved to Script Properties.</div>' : ''}
-    <div class="field">
-      <label>MCP Server API Key</label>
-      <div class="input-group">
-        <input id="keyBox" readonly value="${apiKey}" />
-        <button class="copy-btn" onclick="copyField('keyBox', this)">Copy Key</button>
+
+    ${hasKey ? `
+      <div class="banner-key">
+        🔒 <strong>API Key Enforcement Active</strong>: Clients must send this key (in header, query parameter, or payload).
       </div>
-    </div>
+      <div class="field">
+        <label>MCP Server API Key</label>
+        <div class="input-group">
+          <input id="keyBox" readonly value="${apiKey}" />
+          <button class="btn" onclick="copyField('keyBox', this)">Copy Key</button>
+        </div>
+      </div>
+    ` : `
+      <div class="banner-open">
+        🔓 <strong>Open Access Mode Active (No Sign-in Required)</strong>: The server permits connections without an API key.<br />
+        <span style="font-size: 11px; opacity: 0.9;">Recommended for Claude.ai Custom Connectors.</span>
+      </div>
+    `}
+
     <div class="field">
       <label>Web App Deployment URL</label>
       <div class="input-group">
-        <input id="urlBox" readonly value="${webappUrl}" />
-        <button class="copy-btn" onclick="copyField('urlBox', this)">Copy URL</button>
+        <input id="urlBox" readonly value="${webappUrl}${hasKey ? '?apiKey=' + apiKey : ''}" />
+        <button class="btn" onclick="copyField('urlBox', this)">Copy URL</button>
       </div>
     </div>
+
     <div class="field">
       <label>Sample cURL Request</label>
-      <pre>curl -L -X POST "${webappUrl}?apiKey=${apiKey}" \\
+      <pre>curl -L -X POST "${webappUrl}${hasKey ? '?apiKey=' + apiKey : ''}" \\
   -H "Content-Type: application/json" \\
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'</pre>
     </div>
+
     <div class="btn-bar">
+      <div>
+        ${hasKey ? `
+          <button class="btn btn-danger" onclick="toggleAuth('disable')">🔓 Switch to Open Mode (Remove Key)</button>
+        ` : `
+          <button class="btn btn-success" onclick="toggleAuth('enable')">🔒 Generate & Require API Key</button>
+        `}
+      </div>
       <button class="close-btn" onclick="google.script.host.close()">Done</button>
     </div>
+
     <script>
       function copyField(elementId, btn) {
         var input = document.getElementById(elementId);
@@ -2489,11 +2549,43 @@ function menuShowApiKey() {
           btn.style.background = "#334155";
         }, 2000);
       }
+      function toggleAuth(action) {
+        google.script.run
+          .withSuccessHandler(function() {
+            google.script.host.close();
+          })
+          .applyToggleAuth(action);
+      }
     </script>
   `;
 
-  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(540).setHeight(430);
-  ui.showModalDialog(htmlOutput, "🔑 MCP Server API Key");
+  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(540).setHeight(440);
+  ui.showModalDialog(htmlOutput, "🔑 MCP Server Authentication Settings");
+}
+
+/**
+ * Server handler for toggling API key from modal dialog
+ */
+function applyToggleAuth(action) {
+  if (action === "disable") {
+    PropertiesService.getScriptProperties().deleteProperty("API_KEY");
+  } else if (action === "enable") {
+    const newKey = generateSecureApiKey();
+    PropertiesService.getScriptProperties().setProperty("API_KEY", newKey);
+  }
+}
+
+/**
+ * Menu Action: Switch to Open Mode (Remove API Key)
+ */
+function menuDisableApiKey() {
+  const ui = SpreadsheetApp.getUi();
+  PropertiesService.getScriptProperties().deleteProperty("API_KEY");
+  ui.alert(
+    "Open Access Mode Activated",
+    "API Key has been removed from Script Properties.\n\nThe server is now in Open Mode (No Sign-in Required). Claude.ai and other connectors can connect directly without authentication.",
+    ui.ButtonSet.OK
+  );
 }
 
 /**
