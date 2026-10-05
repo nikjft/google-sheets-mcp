@@ -2398,6 +2398,70 @@ function getWebappUrl() {
 }
 
 /**
+ * Extracts deployment ID from web app URL
+ */
+function getDeploymentId() {
+  const url = getWebappUrl();
+  const match = url.match(/\/s\/([^\/\?]+)/);
+  return match ? match[1] : "AKfycbzY8JgYGAZh4bxDomemDZHde5x_TuUdZRH7f1DA43u0tcCoa-jjy0Rt5Tc1SjknvaU6";
+}
+
+/**
+ * Returns effective MCP base URL (Cloudflare Worker proxy if configured, otherwise GAS Web App URL)
+ */
+function getEffectiveMcpBaseUrl() {
+  const proxy = PropertiesService.getScriptProperties().getProperty("CF_PROXY_URL");
+  if (proxy && proxy.trim()) {
+    let clean = proxy.trim();
+    if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+      clean = "https://" + clean;
+    }
+    clean = clean.replace(/\/+$/, "");
+    if (clean.includes("AKfy")) {
+      if (!clean.endsWith("/exec")) clean += "/exec";
+      return clean;
+    }
+    const depId = getDeploymentId();
+    return clean + "/" + depId + "/exec";
+  }
+  return getWebappUrl();
+}
+
+/**
+ * Server handler: Save or clear Cloudflare Worker proxy URL
+ */
+function saveProxyUrl(proxyInput) {
+  const props = PropertiesService.getScriptProperties();
+  if (!proxyInput || !proxyInput.trim()) {
+    props.deleteProperty("CF_PROXY_URL");
+    const eff = getEffectiveMcpBaseUrl();
+    const apiKey = props.getProperty("API_KEY");
+    return {
+      success: true,
+      hasProxy: false,
+      proxyUrl: "",
+      effectiveBaseUrl: eff,
+      authenticatedUrl: apiKey ? (eff + "?apiKey=" + apiKey) : eff
+    };
+  }
+  let clean = proxyInput.trim();
+  if (!clean.startsWith("http://") && !clean.startsWith("https://")) {
+    clean = "https://" + clean;
+  }
+  clean = clean.replace(/\/+$/, "");
+  props.setProperty("CF_PROXY_URL", clean);
+  const eff = getEffectiveMcpBaseUrl();
+  const apiKey = props.getProperty("API_KEY");
+  return {
+    success: true,
+    hasProxy: true,
+    proxyUrl: clean,
+    effectiveBaseUrl: eff,
+    authenticatedUrl: apiKey ? (eff + "?apiKey=" + apiKey) : eff
+  };
+}
+
+/**
  * Generates secure random API key: mcp_<uuid_alphanumeric>
  */
 function generateSecureApiKey() {
@@ -2423,6 +2487,8 @@ function menuRunDiagnostics() {
 
     const tools = getToolDefinitions();
     const webappUrl = getWebappUrl();
+    const proxyUrl = PropertiesService.getScriptProperties().getProperty("CF_PROXY_URL") || "(None configured)";
+    const effectiveUrl = getEffectiveMcpBaseUrl();
     const currentApiKey = PropertiesService.getScriptProperties().getProperty("API_KEY") || "(None configured - Open mode)";
 
     const html = `
@@ -2450,13 +2516,18 @@ function menuRunDiagnostics() {
         <p style="font-size: 13px; margin: 4px 0; color: #cbd5e1;">API Key Status: <code>${currentApiKey.startsWith("mcp_") ? currentApiKey.substring(0, 10) + "..." : currentApiKey}</code></p>
       </div>
       <div class="card">
-        <h3>Web App Endpoint</h3>
+        <h3>Cloudflare Worker Proxy</h3>
+        <p style="font-size: 13px; margin: 4px 0; color: #cbd5e1;">Proxy Status: <code>${proxyUrl}</code></p>
+        <p style="font-size: 13px; margin: 4px 0; color: #cbd5e1;">Effective Connector URL: <code>${effectiveUrl}</code></p>
+      </div>
+      <div class="card">
+        <h3>Direct Web App Endpoint</h3>
         <code>${webappUrl}</code>
       </div>
       <button onclick="google.script.host.close()">Close</button>
     `;
 
-    const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(520).setHeight(460);
+    const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(540).setHeight(520);
     ui.showModalDialog(htmlOutput, "🚀 MCP Diagnostics & Auth Status");
   } catch (err) {
     ui.alert("Diagnostics Error", "Error running diagnostics: " + err.message, ui.ButtonSet.OK);
@@ -2464,24 +2535,27 @@ function menuRunDiagnostics() {
 }
 
 /**
- * Menu Action: View or Manage API Key / Auth Mode
+ * Menu Action: View or Manage API Key / Auth Mode / Cloudflare Proxy
  */
 function menuShowApiKey() {
   const ui = SpreadsheetApp.getUi();
   const apiKey = PropertiesService.getScriptProperties().getProperty("API_KEY");
-  const webappUrl = getWebappUrl();
+  const rawWebappUrl = getWebappUrl();
+  const savedProxy = PropertiesService.getScriptProperties().getProperty("CF_PROXY_URL") || "";
+  const effectiveBaseUrl = getEffectiveMcpBaseUrl();
   const hasKey = !!apiKey;
-  const authenticatedUrl = hasKey ? (webappUrl + "?apiKey=" + apiKey) : webappUrl;
+  const hasProxy = !!savedProxy;
+  const authenticatedUrl = hasKey ? (effectiveBaseUrl + "?apiKey=" + apiKey) : effectiveBaseUrl;
 
   const html = `
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f1f5f9; padding: 16px; margin: 0; }
       .field { margin-bottom: 12px; }
-      label { display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 6px; }
+      label { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 6px; }
       .input-group { display: flex; gap: 8px; }
-      input { flex: 1; background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; color: #38bdf8; font-family: monospace; font-size: 13px; outline: none; }
+      input { flex: 1; background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; color: #38bdf8; font-family: monospace; font-size: 12px; outline: none; }
       input:focus { border-color: #3b82f6; }
-      button.btn { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap; }
+      button.btn { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap; transition: all 0.15s ease; }
       button.btn:hover { background: #475569; }
       button.btn-primary { background: #2563eb; color: #ffffff; border-color: #3b82f6; font-weight: 600; }
       button.btn-primary:hover { background: #1d4ed8; }
@@ -2491,27 +2565,55 @@ function menuShowApiKey() {
       button.btn-success:hover { background: #15803d; }
       .banner-open { background: rgba(34, 197, 94, 0.15); border: 1px solid #16a34a; color: #86efac; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px; }
       .banner-key { background: rgba(59, 130, 246, 0.15); border: 1px solid #2563eb; color: #93c5fd; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px; }
+      .proxy-card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 12px; margin-bottom: 14px; }
       .subtext { display: block; font-size: 11px; color: #94a3b8; margin-top: 4px; }
       pre { background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; font-size: 11px; color: #a5d6a7; overflow-x: auto; margin: 4px 0 0 0; }
-      .btn-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
+      .btn-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
       button.close-btn { background: #3b82f6; color: white; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
       button.close-btn:hover { background: #2563eb; }
+      .badge-tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; text-transform: none; }
+      .badge-proxy { background: rgba(6, 182, 212, 0.2); color: #67e8f9; border: 1px solid #0891b2; }
+      .badge-direct { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid #d97706; }
     </style>
 
     ${hasKey ? `
       <div class="banner-key">
         🔒 <strong>API Key Enforcement Active</strong>: Incoming requests must provide this key.
       </div>
-
-      <div class="field">
-        <label>🔗 Authenticated MCP URL (Ready to Paste into Claude / Clients)</label>
-        <div class="input-group">
-          <input id="authUrlBox" readonly value="${authenticatedUrl}" onclick="this.select()" />
-          <button class="btn btn-primary" onclick="copyField('authUrlBox', this)">Copy Authenticated URL</button>
-        </div>
-        <span class="subtext">Includes <code>?apiKey=...</code> for clients without custom header input fields.</span>
+    ` : `
+      <div class="banner-open">
+        🔓 <strong>Open Access Mode Active (No Sign-in Required)</strong>: The server accepts connections without an API key.
       </div>
+    `}
 
+    <!-- Cloudflare Worker Proxy Section -->
+    <div class="proxy-card">
+      <label>
+        <span>⚡ Cloudflare Worker Proxy (Required for Claude.ai)</span>
+        <span id="proxyBadge">${hasProxy ? '<span class="badge-tag badge-proxy">✓ Proxy Active</span>' : '<span class="badge-tag badge-direct">⚠️ Direct GAS (No Proxy)</span>'}</span>
+      </label>
+      <div class="input-group">
+        <input id="proxyInput" placeholder="https://your-worker.your-subdomain.workers.dev" value="${escapeHtml(savedProxy)}" />
+        <button class="btn btn-primary" id="saveProxyBtn" onclick="applySaveProxy()">Save Proxy</button>
+        <button class="btn btn-danger" id="clearProxyBtn" onclick="applyClearProxy()" style="display: ${hasProxy ? 'inline-block' : 'none'};">Clear</button>
+      </div>
+      <span class="subtext">Solves Google Apps Script's 302 POST redirects. Paste your Cloudflare Worker URL here to update the MCP URL below.</span>
+    </div>
+
+    <!-- Ready-to-use Connector URL -->
+    <div class="field">
+      <label>
+        <span>🔗 ${hasKey ? 'Authenticated MCP URL' : 'Connector URL'} (Ready for Claude)</span>
+        <span style="color: #60a5fa; font-size: 10px;">One-click copy</span>
+      </label>
+      <div class="input-group">
+        <input id="authUrlBox" readonly value="${authenticatedUrl}" onclick="this.select()" />
+        <button class="btn btn-primary" onclick="copyField('authUrlBox', this)">Copy URL</button>
+      </div>
+      <span class="subtext">${hasKey ? 'Includes <code>?apiKey=...</code> for clients without custom auth header fields.' : 'Paste into Claude Custom Connectors with "No sign-in required".'}</span>
+    </div>
+
+    ${hasKey ? `
       <div class="field">
         <label>🔑 Standalone API Key</label>
         <div class="input-group">
@@ -2519,33 +2621,19 @@ function menuShowApiKey() {
           <button class="btn" onclick="copyField('keyBox', this)">Copy Key</button>
         </div>
       </div>
+    ` : ''}
 
-      <div class="field">
-        <label>🌐 Base Web App URL (Without Key)</label>
-        <div class="input-group">
-          <input id="baseUrlBox" readonly value="${webappUrl}" onclick="this.select()" />
-          <button class="btn" onclick="copyField('baseUrlBox', this)">Copy Base URL</button>
-        </div>
+    <div class="field">
+      <label>🌐 Direct Google Apps Script Endpoint (Bypass Proxy)</label>
+      <div class="input-group">
+        <input id="baseUrlBox" readonly value="${rawWebappUrl}" onclick="this.select()" />
+        <button class="btn" onclick="copyField('baseUrlBox', this)">Copy Direct URL</button>
       </div>
-    ` : `
-      <div class="banner-open">
-        🔓 <strong>Open Access Mode Active (No Sign-in Required)</strong>: The server accepts connections without an API key.<br />
-        <span style="font-size: 11px; opacity: 0.9;">Recommended for Claude.ai Custom Connectors.</span>
-      </div>
-
-      <div class="field">
-        <label>🔗 Connector URL (Open Mode)</label>
-        <div class="input-group">
-          <input id="openUrlBox" readonly value="${webappUrl}" onclick="this.select()" />
-          <button class="btn btn-primary" onclick="copyField('openUrlBox', this)">Copy Connector URL</button>
-        </div>
-        <span class="subtext">Paste this directly into Claude with "No sign-in required".</span>
-      </div>
-    `}
+    </div>
 
     <div class="field">
       <label>Sample cURL Request</label>
-      <pre>curl -L -X POST "${authenticatedUrl}" \\
+      <pre id="curlBox">curl -L -X POST "${authenticatedUrl}" \\
   -H "Content-Type: application/json" \\
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'</pre>
     </div>
@@ -2574,19 +2662,69 @@ function menuShowApiKey() {
           btn.innerText = origText;
           btn.style.background = "";
           btn.style.borderColor = "";
-        }, 2200);
+        }, 2000);
       }
+
+      function applySaveProxy() {
+        var proxyVal = document.getElementById("proxyInput").value;
+        var btn = document.getElementById("saveProxyBtn");
+        var origText = btn.innerText;
+        btn.innerText = "Saving...";
+        btn.disabled = true;
+
+        google.script.run
+          .withSuccessHandler(function(res) {
+            btn.disabled = false;
+            btn.innerText = "✓ Saved!";
+            setTimeout(function() { btn.innerText = origText; }, 2000);
+
+            // Update URL boxes dynamically
+            document.getElementById("authUrlBox").value = res.authenticatedUrl;
+            
+            // Update cURL snippet
+            var curlBox = document.getElementById("curlBox");
+            if (curlBox) {
+              curlBox.innerText = 'curl -L -X POST "' + res.authenticatedUrl + '" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}\'';
+            }
+
+            // Update badge and clear button
+            var badge = document.getElementById("proxyBadge");
+            if (badge) {
+              badge.innerHTML = res.hasProxy
+                ? '<span class="badge-tag badge-proxy">✓ Proxy Active</span>'
+                : '<span class="badge-tag badge-direct">⚠️ Direct GAS (No Proxy)</span>';
+            }
+            var clearBtn = document.getElementById("clearProxyBtn");
+            if (clearBtn) {
+              clearBtn.style.display = res.hasProxy ? "inline-block" : "none";
+            }
+          })
+          .withFailureHandler(function(err) {
+            btn.disabled = false;
+            btn.innerText = origText;
+            alert("Error saving proxy URL: " + err.message);
+          })
+          .saveProxyUrl(proxyVal);
+      }
+
+      function applyClearProxy() {
+        document.getElementById("proxyInput").value = "";
+        applySaveProxy();
+      }
+
       function toggleAuth(action) {
         google.script.run
           .withSuccessHandler(function() {
             google.script.host.close();
+            // Re-open with updated auth state
+            google.script.run.menuShowApiKey();
           })
           .applyToggleAuth(action);
       }
     </script>
   `;
 
-  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(580).setHeight(hasKey ? 470 : 380);
+  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(600).setHeight(hasKey ? 580 : 510);
   ui.showModalDialog(htmlOutput, "🔑 MCP Server URL & Authentication");
 }
 
