@@ -2471,56 +2471,81 @@ function menuShowApiKey() {
   const apiKey = PropertiesService.getScriptProperties().getProperty("API_KEY");
   const webappUrl = getWebappUrl();
   const hasKey = !!apiKey;
+  const authenticatedUrl = hasKey ? (webappUrl + "?apiKey=" + apiKey) : webappUrl;
 
   const html = `
     <style>
       body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f1f5f9; padding: 16px; margin: 0; }
-      .field { margin-bottom: 14px; }
+      .field { margin-bottom: 12px; }
       label { display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; color: #94a3b8; margin-bottom: 6px; }
       .input-group { display: flex; gap: 8px; }
       input { flex: 1; background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; color: #38bdf8; font-family: monospace; font-size: 13px; outline: none; }
-      button.btn { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; }
+      input:focus { border-color: #3b82f6; }
+      button.btn { background: #334155; color: #e2e8f0; border: 1px solid #475569; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; white-space: nowrap; }
       button.btn:hover { background: #475569; }
+      button.btn-primary { background: #2563eb; color: #ffffff; border-color: #3b82f6; font-weight: 600; }
+      button.btn-primary:hover { background: #1d4ed8; }
       button.btn-danger { background: #7f1d1d; color: #fca5a5; border-color: #991b1b; }
       button.btn-danger:hover { background: #991b1b; }
       button.btn-success { background: #166534; color: #86efac; border-color: #15803d; }
       button.btn-success:hover { background: #15803d; }
-      .banner-open { background: rgba(34, 197, 94, 0.15); border: 1px solid #16a34a; color: #86efac; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
-      .banner-key { background: rgba(59, 130, 246, 0.15); border: 1px solid #2563eb; color: #93c5fd; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 14px; }
-      pre { background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 11px; color: #a5d6a7; overflow-x: auto; }
+      .banner-open { background: rgba(34, 197, 94, 0.15); border: 1px solid #16a34a; color: #86efac; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px; }
+      .banner-key { background: rgba(59, 130, 246, 0.15); border: 1px solid #2563eb; color: #93c5fd; padding: 10px; border-radius: 6px; font-size: 12px; margin-bottom: 12px; }
+      .subtext { display: block; font-size: 11px; color: #94a3b8; margin-top: 4px; }
+      pre { background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; font-size: 11px; color: #a5d6a7; overflow-x: auto; margin: 4px 0 0 0; }
       .btn-bar { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
-      button.close-btn { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
+      button.close-btn { background: #3b82f6; color: white; border: none; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
+      button.close-btn:hover { background: #2563eb; }
     </style>
 
     ${hasKey ? `
       <div class="banner-key">
-        🔒 <strong>API Key Enforcement Active</strong>: Clients must send this key (in header, query parameter, or payload).
+        🔒 <strong>API Key Enforcement Active</strong>: Incoming requests must provide this key.
       </div>
+
       <div class="field">
-        <label>MCP Server API Key</label>
+        <label>🔗 Authenticated MCP URL (Ready to Paste into Claude / Clients)</label>
         <div class="input-group">
-          <input id="keyBox" readonly value="${apiKey}" />
+          <input id="authUrlBox" readonly value="${authenticatedUrl}" onclick="this.select()" />
+          <button class="btn btn-primary" onclick="copyField('authUrlBox', this)">Copy Authenticated URL</button>
+        </div>
+        <span class="subtext">Includes <code>?apiKey=...</code> for clients without custom header input fields.</span>
+      </div>
+
+      <div class="field">
+        <label>🔑 Standalone API Key</label>
+        <div class="input-group">
+          <input id="keyBox" readonly value="${apiKey}" onclick="this.select()" />
           <button class="btn" onclick="copyField('keyBox', this)">Copy Key</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>🌐 Base Web App URL (Without Key)</label>
+        <div class="input-group">
+          <input id="baseUrlBox" readonly value="${webappUrl}" onclick="this.select()" />
+          <button class="btn" onclick="copyField('baseUrlBox', this)">Copy Base URL</button>
         </div>
       </div>
     ` : `
       <div class="banner-open">
-        🔓 <strong>Open Access Mode Active (No Sign-in Required)</strong>: The server permits connections without an API key.<br />
+        🔓 <strong>Open Access Mode Active (No Sign-in Required)</strong>: The server accepts connections without an API key.<br />
         <span style="font-size: 11px; opacity: 0.9;">Recommended for Claude.ai Custom Connectors.</span>
+      </div>
+
+      <div class="field">
+        <label>🔗 Connector URL (Open Mode)</label>
+        <div class="input-group">
+          <input id="openUrlBox" readonly value="${webappUrl}" onclick="this.select()" />
+          <button class="btn btn-primary" onclick="copyField('openUrlBox', this)">Copy Connector URL</button>
+        </div>
+        <span class="subtext">Paste this directly into Claude with "No sign-in required".</span>
       </div>
     `}
 
     <div class="field">
-      <label>Web App Deployment URL</label>
-      <div class="input-group">
-        <input id="urlBox" readonly value="${webappUrl}${hasKey ? '?apiKey=' + apiKey : ''}" />
-        <button class="btn" onclick="copyField('urlBox', this)">Copy URL</button>
-      </div>
-    </div>
-
-    <div class="field">
       <label>Sample cURL Request</label>
-      <pre>curl -L -X POST "${webappUrl}${hasKey ? '?apiKey=' + apiKey : ''}" \\
+      <pre>curl -L -X POST "${authenticatedUrl}" \\
   -H "Content-Type: application/json" \\
   -d '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}'</pre>
     </div>
@@ -2530,7 +2555,7 @@ function menuShowApiKey() {
         ${hasKey ? `
           <button class="btn btn-danger" onclick="toggleAuth('disable')">🔓 Switch to Open Mode (Remove Key)</button>
         ` : `
-          <button class="btn btn-success" onclick="toggleAuth('enable')">🔒 Generate & Require API Key</button>
+          <button class="btn btn-success" onclick="toggleAuth('enable')">🔒 Generate Key & Enable Auth Mode</button>
         `}
       </div>
       <button class="close-btn" onclick="google.script.host.close()">Done</button>
@@ -2542,12 +2567,14 @@ function menuShowApiKey() {
         input.select();
         document.execCommand("copy");
         var origText = btn.innerText;
-        btn.innerText = "Copied!";
+        btn.innerText = "✓ Copied!";
         btn.style.background = "#15803d";
+        btn.style.borderColor = "#16a34a";
         setTimeout(function() {
           btn.innerText = origText;
-          btn.style.background = "#334155";
-        }, 2000);
+          btn.style.background = "";
+          btn.style.borderColor = "";
+        }, 2200);
       }
       function toggleAuth(action) {
         google.script.run
@@ -2559,8 +2586,8 @@ function menuShowApiKey() {
     </script>
   `;
 
-  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(540).setHeight(440);
-  ui.showModalDialog(htmlOutput, "🔑 MCP Server Authentication Settings");
+  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(580).setHeight(hasKey ? 470 : 380);
+  ui.showModalDialog(htmlOutput, "🔑 MCP Server URL & Authentication");
 }
 
 /**
