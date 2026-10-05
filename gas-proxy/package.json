@@ -1,0 +1,14 @@
+{
+  "name": "gas-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Generic Cloudflare Worker proxy for Google Apps Script web apps. Fixes POST 302 redirect issues for MCP clients like Claude.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}

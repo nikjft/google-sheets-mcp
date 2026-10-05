@@ -56,15 +56,35 @@ clasp deploy -d "Deploy Google Sheets MCP"
 
 ### Claude.ai (Web Custom Connector)
 
+> [!IMPORTANT]
+> Google Apps Script web apps return a **302 redirect** on every request. The redirect target only accepts GET, which breaks Claude's POST-based MCP handshake. You need the included **`gas-proxy`** Cloudflare Worker (or similar proxy) to bridge this gap.
+
+#### 1. Deploy the Proxy
+
+```bash
+cd gas-proxy
+npm install
+npx wrangler login     # one-time Cloudflare auth
+npx wrangler deploy    # deploys to *.workers.dev
+```
+
+This gives you a URL like `https://gas-proxy.<your-subdomain>.workers.dev`. This single proxy works for **any** GAS web app — just change the deployment ID in the path.
+
+#### 2. Connect Claude
+
 1. In your Google Sheet, open **🤖 MCP Server** > **🔑 View / Manage Auth & API Key**.
 2. Confirm the server is in **Open Access Mode (No Sign-in Required)** (or click **Switch to Open Mode**).
 3. In Claude.ai:
-   - Go to **Settings** > **Connectors** (or Customize) > **Add Custom Connector**.
-   - **URL**: Paste your Web App URL.
+   - Go to **Settings** > **Connectors** > **Add Custom Connector**.
+   - **URL**: `https://gas-proxy.<your-subdomain>.workers.dev/<DEPLOYMENT_ID>/exec`
    - **Authentication**: Select **No sign-in required**.
    - Click **Add**.
 
-*If you prefer using an API key, copy the **Authenticated MCP URL** from the in-sheet dialog (it appends `?apiKey=YOUR_KEY` to the URL).*
+*To use an API key instead, append `?apiKey=YOUR_KEY` to the proxy URL.*
+
+#### Why a Proxy?
+
+GAS responds to every POST with a `302 → script.googleusercontent.com` redirect. That redirect target **only accepts GET** and serves a Google Drive "Page Not Found" page for POST requests. Claude sees this as a 404 and reports: *"the server asked for sign-in when checked (status 404)"*. The proxy follows the redirect correctly and returns the real response.
 
 ### Claude Desktop / Cursor
 

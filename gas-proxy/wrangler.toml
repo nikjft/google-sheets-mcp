@@ -1,0 +1,6 @@
+name = "gas-proxy"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# Deploy once, use for any Google Apps Script web app.
+# Usage: https://gas-proxy.<your-domain>.workers.dev/<DEPLOYMENT_ID>/exec
