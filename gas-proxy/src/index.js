@@ -34,15 +34,12 @@ export default {
     const url = new URL(request.url);
     let gasPath = url.pathname.replace(/^\/+/, ""); // strip leading slash(es)
 
-    if (!gasPath) {
-      return jsonResponse(
-        {
-          error: "Missing GAS deployment path",
-          usage:
-            "https://<worker>.workers.dev/<DEPLOYMENT_ID>/exec[?apiKey=...]",
-        },
-        400
-      );
+    // If path is empty, root, or just "exec", use default deployment ID
+    if (!gasPath || gasPath === "exec" || gasPath === "/") {
+      const defaultDep =
+        (env && env.DEFAULT_DEPLOYMENT_ID) ||
+        "AKfycbzY8JgYGAZh4bxDomemDZHde5x_TuUdZRH7f1DA43u0tcCoa-jjy0Rt5Tc1SjknvaU6";
+      gasPath = `${defaultDep}/exec`;
     }
 
     // Strip optional "macros/s/" if present in path
