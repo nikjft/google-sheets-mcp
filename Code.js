@@ -441,6 +441,14 @@ function getToolDefinitions() {
     {
       name: "list_sheets",
       description: "List all sheet tabs in the spreadsheet with metadata (name, sheetId, index, rowCount, columnCount, isHidden).",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -454,6 +462,14 @@ function getToolDefinitions() {
     {
       name: "get_sheet_schema",
       description: "Get column schema, headers, detected UID/timestamp columns, and dimensions for a given sheet.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -480,6 +496,14 @@ function getToolDefinitions() {
     {
       name: "get_sheet_contents",
       description: "Return rows of a sheet as JSON objects according to header schema. Supports column projection, length truncation, and compact formats for maximum token efficiency.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -537,6 +561,14 @@ function getToolDefinitions() {
     {
       name: "get_filtered_sheet_contents",
       description: "Return rows from a sheet filtered by column criteria. Supports column projection, cell length truncation, and compact formats for token efficiency.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -602,6 +634,14 @@ function getToolDefinitions() {
     {
       name: "get_row",
       description: "Retrieve a single full row by unique ID (UID) or 1-based row number. Returns full untruncated content by default.",
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -647,6 +687,14 @@ function getToolDefinitions() {
     {
       name: "insert_row",
       description: "Insert a new row into the sheet mapped to column headers. Automatically finds the end of contents and appends without requiring a row number or position. Automatically assigns a UID and sets created_at/updated_at timestamps if those columns exist.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -685,6 +733,14 @@ function getToolDefinitions() {
     {
       name: "update_row",
       description: "Update existing row(s) by UID, row number, or column match (e.g. column: 'name', value: 'bob'). When matched by column, updates ALL matching rows. Supports partial updates, formulas, and auto-timestamps updated_at.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -727,6 +783,14 @@ function getToolDefinitions() {
     {
       name: "delete_row",
       description: "Delete row(s) from a sheet by UID, row number, or column match (e.g. column: 'name', value: 'bob'). When matched by column, deletes ALL matching rows.",
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
@@ -761,6 +825,14 @@ function getToolDefinitions() {
     {
       name: "setup_sheet_system_columns",
       description: "Automatically configure persistent system columns (_uid, _created_at, _updated_at) on a sheet and backfill existing rows.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      },
       inputSchema: {
         type: "object",
         properties: {
