@@ -64,7 +64,7 @@ export default {
         method: request.method,
         headers: filterHeaders(request.headers),
         body: request.method !== "GET" && request.method !== "HEAD"
-          ? await request.text()
+          ? await request.arrayBuffer()
           : undefined,
         redirect: "follow",
       });
