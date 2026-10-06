@@ -33,25 +33,36 @@ export default {
     // --- Build target URL ---
     const url = new URL(request.url);
     let gasPath = url.pathname.replace(/^\/+/, ""); // strip leading slash(es)
-
-    // If path is empty, root, or just "exec", use default deployment ID
-    if (!gasPath || gasPath === "exec" || gasPath === "/") {
-      const defaultDep =
-        (env && env.DEFAULT_DEPLOYMENT_ID) ||
-        "AKfycbzY8JgYGAZh4bxDomemDZHde5x_TuUdZRH7f1DA43u0tcCoa-jjy0Rt5Tc1SjknvaU6";
-      gasPath = `${defaultDep}/exec`;
-    }
-
-    // Strip optional "macros/s/" if present in path
     gasPath = gasPath.replace(/^macros\/s\//, "");
 
-    // Ensure /exec is present if just deployment ID was given
-    if (!gasPath.includes("/")) {
+    const defaultDep =
+      (env && env.DEFAULT_DEPLOYMENT_ID) ||
+      "AKfycbzY8JgYGAZh4bxDomemDZHde5x_TuUdZRH7f1DA43u0tcCoa-jjy0Rt5Tc1SjknvaU6";
+
+    let isWebhookRoute = false;
+
+    // Check if path targets the webhook service:
+    // e.g. /webhook, /api/webhook, /<DEPLOYMENT_ID>/webhook
+    if (gasPath === "webhook" || gasPath === "api/webhook") {
+      gasPath = `${defaultDep}/exec`;
+      isWebhookRoute = true;
+    } else if (gasPath.endsWith("/webhook")) {
+      const dep = gasPath.slice(0, -"/webhook".length);
+      gasPath = `${dep || defaultDep}/exec`;
+      isWebhookRoute = true;
+    } else if (!gasPath || gasPath === "exec" || gasPath === "/") {
+      gasPath = `${defaultDep}/exec`;
+    } else if (!gasPath.includes("/")) {
       gasPath = `${gasPath}/exec`;
     }
 
     const targetUrl = new URL(`https://script.google.com/macros/s/${gasPath}`);
-    
+
+    // If reached via a webhook route, ensure action=webhook is set unless overridden
+    if (isWebhookRoute && !targetUrl.searchParams.has("action")) {
+      targetUrl.searchParams.set("action", "webhook");
+    }
+
     // Copy incoming query params
     for (const [k, v] of url.searchParams) {
       targetUrl.searchParams.set(k, v);

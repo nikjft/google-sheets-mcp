@@ -16,6 +16,10 @@ Built as a lightweight Google Apps Script Web App that implements the standard *
   - Setup Tracking Columns (`_uid`, `_updated_at`, `_created_at`) via an interactive wizard or one-click tools.
   - Automatic `onEdit` trigger maintains UUIDs and timestamps when rows are edited manually in the sheet.
   - One-click copy for authenticated URLs and API key management.
+- **Programmatic Webhook Service (Outside MCP)**:
+  - Submit JSON payloads directly via HTTP to insert rows from scripts, third-party webhooks, or automation tools.
+  - Matches payload keys/values to sheet column headers automatically.
+  - **Schema Management Flag**: Throw out unmatching fields by default, or auto-expand schema (`updateSchema=true`) to dynamically add missing fields as new columns.
 - **Token-Efficient by Design**:
   - **Column projection (`columns`)**: Request only needed columns.
   - **Length truncation (`maxCellLength`)**: Truncate long text to avoid blowing LLM context windows.
@@ -125,6 +129,7 @@ Reloading your Google Sheet adds the **`🤖 MCP Server`** menu:
 │   ├── 🔄 Backfill Missing UIDs Only
 │   ├── ⏱️ Backfill Missing Timestamps Only
 │   └── 🌐 Setup System Columns on ALL Sheets
+├── 🔗 Webhook URL & Payload Guide
 ├── 🔓 Switch to Open Mode (No Sign-in Required)
 ├── 🔑 View / Manage Auth & API Key
 ├── 🔄 Re-generate API Key
@@ -133,6 +138,7 @@ Reloading your Google Sheet adds the **`🤖 MCP Server`** menu:
 
 - **Setup Wizard**: Choose columns (`_uid`, `_updated_at`, `_created_at`), custom prefixes (`rec_`), and backfill options.
 - **Auto-Sync on Edit**: Edits to any row automatically populate missing UIDs and update the `_updated_at` timestamp.
+- **Webhook Guide**: Open modal with copyable webhook URLs, schema matching rules, and curl commands.
 - **Auth Management**: View standalone API keys or copy pre-formatted authenticated URLs.
 
 ---
@@ -147,9 +153,89 @@ Reloading your Google Sheet adds the **`🤖 MCP Server`** menu:
 | `get_filtered_sheet_contents` | Filter rows by column criteria (eq, contains, gt, etc.) | `sheetName`, `filters`, `columns`, `matchAll` |
 | `get_row` | Fetch a single full row by UID or 1-based row number | `sheetName`, `rowIdentifier` (`{"uid": "..."}` or `{"rowNumber": 2}`) |
 | `insert_row` | Append a new row; auto-generates UUIDs and timestamps | `sheetName`, `data` (`{"Column": "Value"}`), `returnFullRow` |
+| `webhook_insert` | Programmatic webhook insert matching keys to schema; optional schema expansion | `sheetName`, `data`, `updateSchema` (boolean) |
 | `update_row` | Update row(s) matching UID, row number, or column value | `sheetName`, `rowIdentifier`, `data` |
 | `delete_row` | Delete row(s) matching UID, row number, or column value | `sheetName`, `rowIdentifier` |
 | `setup_sheet_system_columns` | Programmatically add system columns and backfill rows | `sheetName`, `idColumnName`, `createdAtColumnName`, `updatedAtColumnName` |
+
+---
+
+## Web Service & Webhook (Programmatic Inputs Outside MCP)
+
+You can submit JSON payloads directly to your spreadsheet from external services, Zapier/Make, Stripe/GitHub webhooks, IoT devices, or custom scripts using standard HTTP requests to the **same endpoint**.
+
+### 1. Endpoints
+
+- **Via Cloudflare Worker Proxy (`gas-proxy`)**:
+  - `POST https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook`
+  - `POST https://gas-proxy.<subdomain>.workers.dev/webhook`
+  - `POST https://gas-proxy.<subdomain>.workers.dev/<DEPLOYMENT_ID>/webhook`
+- **Direct Google Apps Script URL**:
+  - `POST https://script.google.com/macros/s/<DEPLOYMENT_ID>/exec?action=webhook`
+
+*(If your deployment has an API key configured, pass `?apiKey=YOUR_KEY` or header `x-api-key: YOUR_KEY` or `Authorization: Bearer YOUR_KEY`)*
+
+### 2. Schema Matching & Dynamic Schema Updates
+
+- **Default (`updateSchema=false`)**:
+  The service inspects the sheet's existing header row. Any keys in your JSON payload matching an existing column (exact, case-insensitive, or slug e.g. `first_name` matching `First Name`) are inserted.
+  **Any unmatching keys in your JSON object are thrown out (discarded).**
+
+- **Auto-Add Missing Columns (`updateSchema=true`)**:
+  Include `&updateSchema=true` in the URL query parameters or `"updateSchema": true` in the JSON body.
+  Any keys in the payload that do not already exist in the sheet will be **automatically appended as new column headers** to the header row!
+
+### 3. Usage Examples
+
+#### Single Record (Default: Discards Unmatched Fields)
+```bash
+curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Leads" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Name": "Jane Doe",
+    "Email": "jane@example.com",
+    "Company": "Acme Corp",
+    "TemporaryField": "This field is discarded because it does not exist in the sheet"
+  }'
+```
+
+#### Auto-Expanding Schema (`updateSchema=true`)
+```bash
+curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&updateSchema=true" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Name": "Alex Smith",
+    "Email": "alex@example.com",
+    "LinkedIn": "https://linkedin.com/in/alexsmith"
+  }'
+```
+*If `LinkedIn` does not exist in the sheet, a new `LinkedIn` column is created in row 1.*
+
+#### Batch Submission (Array of Objects)
+```bash
+curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Events" \
+  -H "Content-Type: application/json" \
+  -d '[
+    { "Event": "signup", "User": "alice" },
+    { "Event": "login", "User": "bob" }
+  ]'
+```
+
+#### Response Format
+```json
+{
+  "success": true,
+  "sheetName": "Leads",
+  "insertedRows": 1,
+  "rowNumbers": [42],
+  "assignedIds": ["c7a40b3e-79db-48bc-9f20-b47e5bda1482"],
+  "matchedFields": ["Name", "Email", "Company"],
+  "ignoredFields": ["TemporaryField"],
+  "addedColumns": [],
+  "updateSchema": false,
+  "message": "Successfully inserted 1 row(s) into 'Leads'. Ignored unmatching fields: TemporaryField."
+}
+```
 
 ---
 
@@ -157,3 +243,4 @@ Reloading your Google Sheet adds the **`🤖 MCP Server`** menu:
 
 - **Open Mode (Recommended for Claude.ai)**: No token required. Google Apps Script serves requests directly.
 - **API Key Mode**: Requires the key via header (`Authorization: Bearer <KEY>` or `x-api-key: <KEY>`) or query parameter (`?apiKey=<KEY>`).
+

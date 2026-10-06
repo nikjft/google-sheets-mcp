@@ -66,7 +66,7 @@ const CONFIG = {
 function doGet(e) {
   try {
     const params = (e && e.parameter) ? e.parameter : {};
-    const action = params.action || params.tool || params.method;
+    const action = params.action || params.tool || params.method || (params.webhook ? "webhook" : null);
 
     // Administrative trigger to switch to open mode directly via URL
     if (action === "clear_api_key" || action === "open_mode") {
@@ -111,6 +111,9 @@ function doGet(e) {
       }
 
       const result = executeTool(action, parsedArgs);
+      if (action === "webhook" || action === "webhook_insert" || action === "submit_payload") {
+        return jsonResponse(result);
+      }
       return jsonResponse({ success: true, action: action, result: result });
     }
 
@@ -152,16 +155,20 @@ function doGet(e) {
  * Supports:
  * - Standard JSON-RPC 2.0 MCP requests (initialize, tools/list, tools/call, ping)
  * - Batch JSON-RPC requests
+ * - Programmatic Webhook submissions outside MCP (JSON object, array of rows, url-encoded, plain text)
  * - REST payload fallback ({ action: "...", arguments: {...} })
  */
 function doPost(e) {
+  let payload = null;
   try {
     let bodyText = "";
     if (e && e.postData && e.postData.contents) {
       bodyText = e.postData.contents;
     }
 
-    if (!bodyText) {
+    const params = (e && e.parameter) ? e.parameter : {};
+
+    if (!bodyText && Object.keys(params).length === 0) {
       return jsonResponse({
         jsonrpc: "2.0",
         id: null,
@@ -169,15 +176,39 @@ function doPost(e) {
       });
     }
 
-    let payload;
-    try {
-      payload = JSON.parse(bodyText);
-    } catch (parseErr) {
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id: null,
-        error: { code: -32700, message: "Parse error: Invalid JSON: " + parseErr.message }
-      });
+    let isJson = true;
+    if (bodyText) {
+      try {
+        payload = JSON.parse(bodyText);
+      } catch (parseErr) {
+        isJson = false;
+      }
+    }
+
+    // Check if URL parameters request webhook processing
+    const isWebhookParam = (
+      params.action === "webhook" ||
+      params.action === "webhook_insert" ||
+      params.action === "submit_payload" ||
+      params.webhook === "true" ||
+      params.webhook === "1" ||
+      params.mode === "webhook"
+    );
+
+    // If body is not valid JSON, check if it's a webhook with form-encoded parameters or raw text
+    if (!isJson) {
+      if (isWebhookParam || params.sheetName || params.sheet) {
+        payload = Object.assign({}, params);
+        if (bodyText && !payload.text && !payload.data) {
+          payload.text = bodyText;
+        }
+      } else {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Parse error: Invalid JSON in request body" }
+        });
+      }
     }
 
     // Allow MCP protocol discovery (initialize, ping, tools/list) without blocking on API key if client is probing
@@ -191,6 +222,14 @@ function doPost(e) {
     // Authentication verification
     const authCheck = validateAuth(e, payload);
     if (!authCheck.authorized && !isProbe) {
+      const isRpc = payload && (payload.jsonrpc === "2.0" || (Array.isArray(payload) && payload[0] && payload[0].jsonrpc));
+      if (!isRpc) {
+        return jsonResponse({
+          success: false,
+          error: "Unauthorized",
+          message: authCheck.error
+        }, 401);
+      }
       return jsonResponse({
         jsonrpc: "2.0",
         id: (payload && payload.id !== undefined) ? payload.id : null,
@@ -198,38 +237,75 @@ function doPost(e) {
       });
     }
 
-    // Support JSON-RPC 2.0 batch requests
+    // 1. Support JSON-RPC 2.0 batch requests vs Webhook array of data records
     if (Array.isArray(payload)) {
-      const responses = payload.map(req => handleJsonRpcRequest(req));
-      return jsonResponse(responses.filter(r => r !== null));
+      const isJsonRpcBatch = payload.length > 0 && payload.every(r => r && (r.jsonrpc === "2.0" || r.method));
+      if (isJsonRpcBatch) {
+        const responses = payload.map(req => handleJsonRpcRequest(req));
+        return jsonResponse(responses.filter(r => r !== null));
+      }
+      // Non-RPC array: treat as batch data rows submitted to webhook
+      const webhookArgs = Object.assign({}, params, { data: payload });
+      const result = toolWebhookInsert(webhookArgs);
+      return jsonResponse(result);
     }
 
-    // Standard JSON-RPC 2.0 single request
+    // 2. Standard JSON-RPC 2.0 single request
     if (payload && payload.jsonrpc === "2.0") {
       const response = handleJsonRpcRequest(payload);
       return jsonResponse(response || {});
     }
 
-    // REST fallback support: { action: "...", arguments: {...} }
-    const action = payload.action || payload.tool;
+    // 3. Webhook invocation (explicit action or parameter)
+    const action = params.action || (payload && payload.action) || params.tool || (payload && payload.tool);
+    const isExplicitWebhook = (
+      isWebhookParam ||
+      action === "webhook" ||
+      action === "webhook_insert" ||
+      action === "submit_payload" ||
+      (payload && (payload.webhook === true || payload.webhook === "true"))
+    );
+
+    if (isExplicitWebhook) {
+      const webhookArgs = Object.assign({}, params, payload);
+      const result = toolWebhookInsert(webhookArgs);
+      return jsonResponse(result);
+    }
+
+    // 4. REST tool fallback: { action: "...", arguments: {...} }
     if (action) {
       const args = payload.arguments || payload.params || payload.data || {};
       const result = executeTool(action, args);
       return jsonResponse({ success: true, action: action, result: result });
     }
 
+    // 5. Implicit programmatic webhook fallback
+    // If a non-RPC JSON object is posted (e.g. { "Name": "Alice", "Email": "alice@example.com" }):
+    if (payload && typeof payload === "object") {
+      const webhookArgs = Object.assign({}, params, payload);
+      const result = toolWebhookInsert(webhookArgs);
+      return jsonResponse(result);
+    }
+
     // Default error for unhandled POST schema
     return jsonResponse({
       jsonrpc: "2.0",
-      id: payload.id !== undefined ? payload.id : null,
-      error: { code: -32600, message: "Invalid Request: Expected JSON-RPC 2.0 object or { action, arguments }" }
+      id: payload && payload.id !== undefined ? payload.id : null,
+      error: { code: -32600, message: "Invalid Request: Expected JSON-RPC 2.0 object, webhook payload, or { action, arguments }" }
     });
   } catch (error) {
+    if (payload && payload.jsonrpc === "2.0") {
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: payload.id !== undefined ? payload.id : null,
+        error: { code: -32603, message: "Internal error: " + error.toString() }
+      });
+    }
     return jsonResponse({
-      jsonrpc: "2.0",
-      id: null,
-      error: { code: -32603, message: "Internal error: " + error.toString() }
-    });
+      success: false,
+      error: "Internal Server Error",
+      message: error.toString()
+    }, 500);
   }
 }
 
@@ -731,6 +807,48 @@ function getToolDefinitions() {
       }
     },
     {
+      name: "webhook_insert",
+      description: "Submit a programmatic payload to a sheet matching keys/values to the column schema. Discards unmatched fields by default, or dynamically expands the sheet schema (adds missing columns) when updateSchema=true. Supports auto-assigning UIDs and timestamps.",
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        openWorldHint: false
+      },
+      inputSchema: {
+        type: "object",
+        properties: {
+          sheetName: {
+            type: "string",
+            description: "Name of the sheet tab. Defaults to the first sheet if omitted."
+          },
+          data: {
+            description: "JSON object or array of objects containing key/value pairs to insert.",
+            type: ["object", "array"]
+          },
+          updateSchema: {
+            type: "boolean",
+            description: "If true, adds missing keys as new columns in the sheet header. If false (default), throws out unmatching keys."
+          },
+          spreadsheetId: {
+            type: "string",
+            description: "Optional spreadsheet ID."
+          },
+          headerRow: {
+            type: "number",
+            description: "1-based row index for headers (default: 1)."
+          },
+          idColumn: {
+            type: "string",
+            description: "Optional column name to treat as unique ID."
+          }
+        },
+        required: ["data"]
+      }
+    },
+    {
       name: "update_row",
       description: "Update existing row(s) by UID, row number, or column match (e.g. column: 'name', value: 'bob'). When matched by column, updates ALL matching rows. Supports partial updates, formulas, and auto-timestamps updated_at.",
       readOnlyHint: false,
@@ -896,6 +1014,11 @@ function executeTool(toolName, args) {
 
     case "insert_row":
       return toolInsertRow(args);
+
+    case "webhook":
+    case "webhook_insert":
+    case "submit_payload":
+      return toolWebhookInsert(args);
 
     case "update_row":
       return toolUpdateRow(args);
@@ -1462,6 +1585,325 @@ function toolInsertRow(args) {
       response.insertedData = rowData;
     }
     return response;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Webhook service / Tool: webhook_insert (aliases: webhook, submit_payload)
+ * Submits programmatic payloads outside of MCP to insert rows into a sheet.
+ * Matches JSON keys/values to the sheet's column schema (exact, case-insensitive, or slug).
+ * If updateSchema is false (default), unmatching keys are thrown out (discarded).
+ * If updateSchema is true, unmatching keys are dynamically appended as new column headers.
+ * Automatically populates UIDs and timestamps if system columns exist in the sheet.
+ */
+function toolWebhookInsert(args) {
+  args = args || {};
+
+  // Extract raw payload data
+  let rawData = null;
+  if (args.data !== undefined) {
+    rawData = args.data;
+  } else if (args.records !== undefined) {
+    rawData = args.records;
+  } else if (args.rows !== undefined) {
+    rawData = args.rows;
+  } else if (args.items !== undefined) {
+    rawData = args.items;
+  } else if (args.payload !== undefined) {
+    rawData = args.payload;
+  } else if (Array.isArray(args)) {
+    rawData = args;
+  } else {
+    // If passed flat payload object, extract row properties by omitting control keys
+    const copy = Object.assign({}, args);
+    const controlKeys = [
+      "action", "tool", "method", "sheetName", "sheet",
+      "spreadsheetId", "headerRow", "updateSchema", "update_schema",
+      "addMissingFields", "add_missing_fields", "idColumn",
+      "apiKey", "key", "token", "webhook", "mode", "arguments"
+    ];
+    for (let i = 0; i < controlKeys.length; i++) {
+      delete copy[controlKeys[i]];
+    }
+    if (Object.keys(copy).length > 0) {
+      rawData = copy;
+    }
+  }
+
+  // Parse if rawData was passed as a JSON string
+  if (typeof rawData === "string") {
+    try {
+      rawData = JSON.parse(rawData);
+    } catch (e) {
+      // Treat plain text string as a single text record
+      rawData = { text: rawData };
+    }
+  }
+
+  if (!rawData) {
+    throw new Error("Missing payload data. Provide a JSON object or array of objects to insert.");
+  }
+
+  // Normalize to array of objects
+  let rowsList = [];
+  if (Array.isArray(rawData)) {
+    rowsList = rawData.filter(r => r && typeof r === "object");
+  } else if (typeof rawData === "object" && rawData !== null) {
+    rowsList = [rawData];
+  } else {
+    rowsList = [{ text: String(rawData) }];
+  }
+
+  if (rowsList.length === 0) {
+    throw new Error("No valid data rows found in payload.");
+  }
+
+  const updateSchema = (
+    args.updateSchema === true ||
+    args.updateSchema === "true" ||
+    args.updateSchema === 1 ||
+    args.updateSchema === "1" ||
+    args.addMissingFields === true ||
+    args.addMissingFields === "true" ||
+    args.update_schema === true ||
+    args.update_schema === "true"
+  );
+
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000);
+
+    const ss = getSpreadsheet(args.spreadsheetId);
+    const sheetName = args.sheetName || args.sheet || null;
+    let sheet;
+    if (sheetName) {
+      sheet = getSheetOrThrow(ss, sheetName);
+    } else {
+      const sheets = ss.getSheets();
+      if (!sheets || sheets.length === 0) {
+        throw new Error("Spreadsheet contains no sheets.");
+      }
+      sheet = sheets[0];
+    }
+
+    const finalSheetName = sheet.getName();
+    const headerRowIndex = Number(args.headerRow) || 1;
+    let lastCol = sheet.getLastColumn();
+
+    const norm = s => String(s || "").trim().toLowerCase();
+    const slug = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+    // Handle completely empty sheet
+    if (lastCol === 0) {
+      if (!updateSchema) {
+        throw new Error(
+          "Sheet '" + finalSheetName + "' has no headers. " +
+          "Set 'updateSchema=true' to create headers automatically from input keys."
+        );
+      }
+      const initialKeys = [];
+      for (let r = 0; r < rowsList.length; r++) {
+        const kList = Object.keys(rowsList[r]);
+        for (let k = 0; k < kList.length; k++) {
+          if (!initialKeys.includes(kList[k])) initialKeys.push(kList[k]);
+        }
+      }
+      if (initialKeys.length === 0) {
+        throw new Error("No keys found in payload to create initial sheet headers.");
+      }
+      sheet.getRange(headerRowIndex, 1, 1, initialKeys.length).setValues([initialKeys]);
+      try {
+        sheet.getRange(headerRowIndex, 1, 1, initialKeys.length).setFontWeight("bold");
+      } catch (err) {}
+      lastCol = initialKeys.length;
+    }
+
+    // Read existing headers
+    const rawHeaders = sheet.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
+    const headerMap = [];
+    for (let i = 0; i < rawHeaders.length; i++) {
+      const hName = String(rawHeaders[i]).trim();
+      if (hName) {
+        headerMap.push({
+          name: hName,
+          colIndex: i + 1,
+          normalized: norm(hName),
+          slug: slug(hName)
+        });
+      }
+    }
+
+    function findHeader(key) {
+      const keyNorm = norm(key);
+      const keySlug = slug(key);
+
+      // 1. Exact match
+      let found = headerMap.find(h => h.name === key);
+      if (found) return found;
+
+      // 2. Case-insensitive trimmed match
+      found = headerMap.find(h => h.normalized === keyNorm);
+      if (found) return found;
+
+      // 3. Slug match (e.g. first_name -> First Name)
+      if (keySlug) {
+        found = headerMap.find(h => h.slug === keySlug);
+        if (found) return found;
+      }
+
+      return null;
+    }
+
+    const matchedFieldsSet = {};
+    const ignoredFieldsSet = {};
+    const addedColumns = [];
+
+    // If updateSchema is true, identify and append missing headers
+    if (updateSchema) {
+      for (let r = 0; r < rowsList.length; r++) {
+        const keys = Object.keys(rowsList[r]);
+        for (let k = 0; k < keys.length; k++) {
+          const key = keys[k];
+          if (!findHeader(key)) {
+            lastCol++;
+            sheet.getRange(headerRowIndex, lastCol).setValue(key);
+            try {
+              sheet.getRange(headerRowIndex, lastCol).setFontWeight("bold");
+            } catch (err) {}
+            const newHeader = {
+              name: key,
+              colIndex: lastCol,
+              normalized: norm(key),
+              slug: slug(key)
+            };
+            headerMap.push(newHeader);
+            addedColumns.push(key);
+          }
+        }
+      }
+    }
+
+    // Identify system columns (UID, created_at, updated_at)
+    let idColName = args.idColumn || null;
+    let createdColName = null;
+    let updatedColName = null;
+
+    for (let h = 0; h < headerMap.length; h++) {
+      const item = headerMap[h];
+      if (!idColName && isMatchColumn(item.name, CONFIG.DEFAULT_ID_COLUMNS)) idColName = item.name;
+      if (!createdColName && isMatchColumn(item.name, CONFIG.DEFAULT_CREATED_COLUMNS)) createdColName = item.name;
+      if (!updatedColName && isMatchColumn(item.name, CONFIG.DEFAULT_UPDATED_COLUMNS)) updatedColName = item.name;
+    }
+
+    const nowIso = new Date().toISOString();
+    const startRow = Math.max(headerRowIndex + 1, sheet.getLastRow() + 1);
+    const numRows = rowsList.length;
+
+    // Expand rows if needed
+    if (startRow + numRows - 1 > sheet.getMaxRows()) {
+      sheet.insertRowsAfter(sheet.getMaxRows(), (startRow + numRows - 1) - sheet.getMaxRows());
+    }
+
+    const allValues = [];
+    const formulasToSet = [];
+    const assignedIds = [];
+    const rowNumbers = [];
+
+    for (let rIdx = 0; rIdx < numRows; rIdx++) {
+      const currentRowNum = startRow + rIdx;
+      rowNumbers.push(currentRowNum);
+
+      const rowObj = rowsList[rIdx];
+      const assignedColValues = {};
+
+      const entries = Object.entries(rowObj);
+      for (let e = 0; e < entries.length; e++) {
+        const key = entries[e][0];
+        const rawVal = entries[e][1];
+        const headerItem = findHeader(key);
+        if (headerItem) {
+          matchedFieldsSet[key] = true;
+          assignedColValues[headerItem.colIndex] = rawVal;
+        } else {
+          ignoredFieldsSet[key] = true;
+        }
+      }
+
+      // Auto-populate UID if column exists in sheet
+      if (idColName) {
+        const idHeader = headerMap.find(h => h.name === idColName);
+        if (idHeader) {
+          let idVal = assignedColValues[idHeader.colIndex];
+          if (idVal === undefined || idVal === null || idVal === "") {
+            idVal = Utilities.getUuid();
+            assignedColValues[idHeader.colIndex] = idVal;
+          }
+          assignedIds.push(idVal);
+        }
+      }
+
+      // Auto-populate created_at / updated_at timestamps
+      if (createdColName) {
+        const createdHeader = headerMap.find(h => h.name === createdColName);
+        if (createdHeader) {
+          if (assignedColValues[createdHeader.colIndex] === undefined || assignedColValues[createdHeader.colIndex] === "") {
+            assignedColValues[createdHeader.colIndex] = nowIso;
+          }
+        }
+      }
+      if (updatedColName) {
+        const updatedHeader = headerMap.find(h => h.name === updatedColName);
+        if (updatedHeader) {
+          if (assignedColValues[updatedHeader.colIndex] === undefined || assignedColValues[updatedHeader.colIndex] === "") {
+            assignedColValues[updatedHeader.colIndex] = nowIso;
+          }
+        }
+      }
+
+      // Prepare row values array
+      const rowValues = [];
+      for (let c = 1; c <= lastCol; c++) {
+        const val = assignedColValues[c] !== undefined ? assignedColValues[c] : "";
+        if (typeof val === "string" && val.startsWith("=")) {
+          rowValues.push("");
+          formulasToSet.push({ row: currentRowNum, col: c, formula: val });
+        } else {
+          rowValues.push(val);
+        }
+      }
+      allValues.push(rowValues);
+    }
+
+    // Batch insert values
+    sheet.getRange(startRow, 1, numRows, lastCol).setValues(allValues);
+
+    // Set any formula cells
+    for (let f = 0; f < formulasToSet.length; f++) {
+      const item = formulasToSet[f];
+      sheet.getRange(item.row, item.col).setFormula(item.formula);
+    }
+
+    SpreadsheetApp.flush();
+
+    const matchedList = Object.keys(matchedFieldsSet);
+    const ignoredList = Object.keys(ignoredFieldsSet);
+
+    return {
+      success: true,
+      sheetName: finalSheetName,
+      insertedRows: numRows,
+      rowNumbers: rowNumbers,
+      assignedIds: assignedIds.length > 0 ? assignedIds : undefined,
+      matchedFields: matchedList,
+      ignoredFields: ignoredList,
+      addedColumns: addedColumns,
+      updateSchema: updateSchema,
+      message: "Successfully inserted " + numRows + " row(s) into '" + finalSheetName + "'." +
+        (addedColumns.length > 0 ? " Added columns: " + addedColumns.join(", ") + "." : "") +
+        (ignoredList.length > 0 ? " Ignored unmatching fields: " + ignoredList.join(", ") + "." : "")
+    };
   } finally {
     lock.releaseLock();
   }
@@ -2265,6 +2707,26 @@ Content-Type: application/json
     }
   }
 }</pre>
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <h3 style="margin-top: 0; font-size: 16px;">Web Service / Webhook (Outside MCP)</h3>
+        <span class="badge badge-green">Programmatic Input</span>
+      </div>
+      <p style="font-size: 14px; color: #cbd5e1;">Submit arbitrary JSON payloads directly to any sheet tab via standard HTTP POST/GET. Automatically maps keys to sheet columns, with an optional flag to auto-expand the schema:</p>
+      <pre>POST /exec?action=webhook&sheetName=Companies
+Content-Type: application/json
+
+{
+  "Name": "Acme Innovations",
+  "Industry": "Technology",
+  "Website": "https://acme.example.com"
+}</pre>
+      <p style="font-size: 13px; color: #94a3b8; margin: 8px 0 4px 0;"><strong>Schema Matching Behavior:</strong></p>
+      <ul style="font-size: 13px; color: #cbd5e1; margin-top: 4px; padding-left: 20px;">
+        <li><strong>Default (<code>updateSchema=false</code>):</strong> Matches input keys against existing column headers (case-insensitive & trimmed). Any unmatching keys in your JSON object are discarded.</li>
+        <li><strong>Auto-Add Missing Columns (<code>updateSchema=true</code>):</strong> Pass <code>updateSchema=true</code> in the URL query or payload body. Any new keys in your JSON object will be automatically created as new column headers in the sheet!</li>
+        <li><strong>Batch Submissions:</strong> Submit a JSON array <code>[{...}, {...}]</code> to insert multiple rows in a single batch.</li>
+      </ul>
     </div>
 
     <div class="card">
@@ -2358,6 +2820,7 @@ function onOpen(e) {
         .addItem("🌐 Setup System Columns on ALL Sheets", "menuSetupSystemColumnsAllSheets")
       )
       .addSeparator()
+      .addItem("🔗 Webhook URL & Payload Guide", "menuShowWebhookGuide")
       .addItem("🔓 Switch to Open Mode (No Sign-in Required)", "menuDisableApiKey")
       .addItem("🔑 View / Manage Auth & API Key", "menuShowApiKey")
       .addItem("🔄 Re-generate API Key", "menuRegenerateApiKey")
@@ -3447,5 +3910,77 @@ Content-Type: application/json
 
   const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(620).setHeight(520);
   ui.showModalDialog(htmlOutput, "📖 MCP Server Documentation");
+}
+
+/**
+ * Menu Action: Webhook URL & Payload Guide
+ */
+function menuShowWebhookGuide() {
+  const ui = SpreadsheetApp.getUi();
+  const webappUrl = getWebappUrl();
+  const apiKey = PropertiesService.getScriptProperties().getProperty("API_KEY") || "";
+  const authQuery = apiKey ? "&apiKey=" + apiKey : "";
+  const authHeader = apiKey ? '  -H "x-api-key: ' + apiKey + '" \\\n' : "";
+  const webhookUrl = webappUrl + "?action=webhook" + authQuery;
+
+  const html = `
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f1f5f9; padding: 16px; margin: 0; line-height: 1.5; }
+      h2 { margin-top: 0; font-size: 17px; color: #f8fafc; }
+      h3 { margin: 16px 0 6px 0; font-size: 14px; color: #38bdf8; }
+      p { font-size: 12px; color: #cbd5e1; margin: 4px 0 8px 0; }
+      pre { background: #020617; border: 1px solid #334155; border-radius: 6px; padding: 10px; font-size: 12px; color: #7dd3fc; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+      code { font-family: monospace; color: #f43f5e; background: rgba(244,63,94,0.1); padding: 1px 4px; border-radius: 4px; }
+      .badge { display: inline-block; background: #0284c7; color: #e0f2fe; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+      .btn { background: #2563eb; color: white; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; }
+      .btn:hover { background: #1d4ed8; }
+      .btn-close { float: right; margin-top: 12px; background: #475569; }
+      .btn-close:hover { background: #334155; }
+    </style>
+
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <h2>🔗 Programmatic Webhook Service</h2>
+      <span class="badge">Outside MCP</span>
+    </div>
+    <p>Submit JSON payloads directly to your spreadsheet from external scripts, webhooks, or automation tools without using MCP protocols.</p>
+
+    <h3>1. Webhook Endpoint</h3>
+    <pre>${webhookUrl}</pre>
+
+    <h3>2. How Schema Matching Works</h3>
+    <p><strong>Default (unmatching fields discarded):</strong> Keys matching existing sheet columns are inserted. Any unmatching keys in your JSON object are thrown out automatically.</p>
+    <p><strong>Auto-expand Schema (<code>updateSchema=true</code>):</strong> Add <code>&updateSchema=true</code> to your URL or payload. Any keys not currently in the sheet will be automatically appended as new columns to the header row!</p>
+
+    <h3>3. Example: Submit a Single Record (curl)</h3>
+    <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1${authQuery}" \\
+  -H "Content-Type: application/json" \\
+${authHeader}  -d '{
+    "Name": "Jane Doe",
+    "Email": "jane@example.com",
+    "Notes": "New lead from website"
+  }'</pre>
+
+    <h3>4. Example: Auto-Add Missing Columns (<code>updateSchema=true</code>)</h3>
+    <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1&updateSchema=true${authQuery}" \\
+  -H "Content-Type: application/json" \\
+${authHeader}  -d '{
+    "Name": "Alex Smith",
+    "Department": "Engineering",
+    "New Custom Field": "Automatically creates this column!"
+  }'</pre>
+
+    <h3>5. Example: Batch Array Submission</h3>
+    <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1${authQuery}" \\
+  -H "Content-Type: application/json" \\
+${authHeader}  -d '[
+    { "Name": "Alice", "Role": "Admin" },
+    { "Name": "Bob", "Role": "Editor" }
+  ]'</pre>
+
+    <button class="btn btn-close" onclick="google.script.host.close()">Close</button>
+  `;
+
+  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(640).setHeight(560);
+  ui.showModalDialog(htmlOutput, "🔗 Webhook URL & Payload Guide");
 }
 

@@ -49,6 +49,21 @@ Works with **any** GAS web app — just swap the deployment ID in the path.
 4. **Authentication**: "No sign-in required"
 5. Done ✅
 
+## Programmatic Webhooks (Outside MCP)
+
+Send POST requests to your sheets directly through the proxy without MCP connectors:
+
+```bash
+# Direct webhook path (forwards to default or specified deployment /exec?action=webhook):
+POST https://gas-proxy.<your-subdomain>.workers.dev/webhook?sheetName=Leads
+
+# Or with deployment ID:
+POST https://gas-proxy.<your-subdomain>.workers.dev/<DEPLOYMENT_ID>/webhook?sheetName=Leads
+
+# Or query parameter on /exec:
+POST https://gas-proxy.<your-subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&updateSchema=true
+```
+
 ## Local Development
 
 ```bash
