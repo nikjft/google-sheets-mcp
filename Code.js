@@ -843,6 +843,10 @@ function getToolDefinitions() {
           idColumn: {
             type: "string",
             description: "Optional column name to treat as unique ID."
+          },
+          upsertKey: {
+            type: "string",
+            description: "Optional column name to act as unique match key for upserting (e.g. 'Email', 'ID', 'uid'). If a row with a matching value already exists, it is updated; otherwise a new row is appended."
           }
         },
         required: ["data"]
@@ -1622,6 +1626,7 @@ function toolWebhookInsert(args) {
       "action", "tool", "method", "sheetName", "sheet",
       "spreadsheetId", "headerRow", "updateSchema", "update_schema",
       "addMissingFields", "add_missing_fields", "idColumn",
+      "upsertKey", "keyColumn", "matchKey", "matchColumn", "uniqueKey",
       "apiKey", "key", "token", "webhook", "mode", "arguments"
     ];
     for (let i = 0; i < controlKeys.length; i++) {
@@ -1670,6 +1675,8 @@ function toolWebhookInsert(args) {
     args.update_schema === true ||
     args.update_schema === "true"
   );
+
+  const upsertKeyName = args.upsertKey || args.keyColumn || args.matchKey || args.matchColumn || args.uniqueKey || null;
 
   const lock = LockService.getScriptLock();
   try {
@@ -1797,24 +1804,44 @@ function toolWebhookInsert(args) {
       if (!updatedColName && isMatchColumn(item.name, CONFIG.DEFAULT_UPDATED_COLUMNS)) updatedColName = item.name;
     }
 
-    const nowIso = new Date().toISOString();
-    const startRow = Math.max(headerRowIndex + 1, sheet.getLastRow() + 1);
-    const numRows = rowsList.length;
-
-    // Expand rows if needed
-    if (startRow + numRows - 1 > sheet.getMaxRows()) {
-      sheet.insertRowsAfter(sheet.getMaxRows(), (startRow + numRows - 1) - sheet.getMaxRows());
+    // Detect optional upsert key header
+    let upsertHeader = null;
+    if (upsertKeyName) {
+      upsertHeader = findHeader(upsertKeyName);
+      if (!upsertHeader) {
+        throw new Error("Specified upsertKey column '" + upsertKeyName + "' not found in sheet headers.");
+      }
     }
 
-    const allValues = [];
-    const formulasToSet = [];
+    // Build existing rows lookup index if upserting and sheet has existing data rows
+    const keyToRowsMap = new Map();
+    const currentLastRow = sheet.getLastRow();
+    const dataRowCount = currentLastRow - headerRowIndex;
+
+    if (upsertHeader && dataRowCount > 0) {
+      const existingKeyValues = sheet.getRange(headerRowIndex + 1, upsertHeader.colIndex, dataRowCount, 1).getValues();
+      for (let r = 0; r < dataRowCount; r++) {
+        const cellVal = existingKeyValues[r][0];
+        if (cellVal !== "" && cellVal !== null && cellVal !== undefined) {
+          const kStr = String(cellVal).trim().toLowerCase();
+          if (!keyToRowsMap.has(kStr)) {
+            keyToRowsMap.set(kStr, []);
+          }
+          keyToRowsMap.get(kStr).push(headerRowIndex + 1 + r);
+        }
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const updatedRowNumbers = [];
+    const insertedRowNumbers = [];
     const assignedIds = [];
-    const rowNumbers = [];
 
-    for (let rIdx = 0; rIdx < numRows; rIdx++) {
-      const currentRowNum = startRow + rIdx;
-      rowNumbers.push(currentRowNum);
+    // Separate rows to insert vs rows to update
+    const rowsToInsert = [];
+    let nextInsertRow = Math.max(headerRowIndex + 1, currentLastRow + 1);
 
+    for (let rIdx = 0; rIdx < rowsList.length; rIdx++) {
       const rowObj = rowsList[rIdx];
       const assignedColValues = {};
 
@@ -1831,78 +1858,185 @@ function toolWebhookInsert(args) {
         }
       }
 
-      // Auto-populate UID if column exists in sheet
-      if (idColName) {
-        const idHeader = headerMap.find(h => h.name === idColName);
-        if (idHeader) {
-          let idVal = assignedColValues[idHeader.colIndex];
-          if (idVal === undefined || idVal === null || idVal === "") {
-            idVal = Utilities.getUuid();
-            assignedColValues[idHeader.colIndex] = idVal;
-          }
-          assignedIds.push(idVal);
-        }
-      }
+      // Check if this row matches an existing row for upsert
+      let matchedExistingRows = null;
+      let targetKeyValue = undefined;
 
-      // Auto-populate created_at / updated_at timestamps
-      if (createdColName) {
-        const createdHeader = headerMap.find(h => h.name === createdColName);
-        if (createdHeader) {
-          if (assignedColValues[createdHeader.colIndex] === undefined || assignedColValues[createdHeader.colIndex] === "") {
-            assignedColValues[createdHeader.colIndex] = nowIso;
-          }
+      if (upsertHeader) {
+        if (assignedColValues[upsertHeader.colIndex] !== undefined) {
+          targetKeyValue = assignedColValues[upsertHeader.colIndex];
+        } else if (rowObj[upsertKeyName] !== undefined) {
+          targetKeyValue = rowObj[upsertKeyName];
         }
-      }
-      if (updatedColName) {
-        const updatedHeader = headerMap.find(h => h.name === updatedColName);
-        if (updatedHeader) {
-          if (assignedColValues[updatedHeader.colIndex] === undefined || assignedColValues[updatedHeader.colIndex] === "") {
-            assignedColValues[updatedHeader.colIndex] = nowIso;
+
+        if (targetKeyValue !== undefined && targetKeyValue !== null && String(targetKeyValue).trim() !== "") {
+          const lookupKey = String(targetKeyValue).trim().toLowerCase();
+          if (keyToRowsMap.has(lookupKey)) {
+            matchedExistingRows = keyToRowsMap.get(lookupKey);
           }
         }
       }
 
-      // Prepare row values array
-      const rowValues = [];
-      for (let c = 1; c <= lastCol; c++) {
-        const val = assignedColValues[c] !== undefined ? assignedColValues[c] : "";
-        if (typeof val === "string" && val.startsWith("=")) {
-          rowValues.push("");
-          formulasToSet.push({ row: currentRowNum, col: c, formula: val });
-        } else {
-          rowValues.push(val);
+      if (matchedExistingRows && matchedExistingRows.length > 0) {
+        // === UPDATE EXISTING ROW(S) ===
+        for (let m = 0; m < matchedExistingRows.length; m++) {
+          const targetRow = matchedExistingRows[m];
+          const existingRowVals = sheet.getRange(targetRow, 1, 1, lastCol).getValues()[0];
+          const formulasInRow = [];
+
+          const colEntries = Object.entries(assignedColValues);
+          for (let ce = 0; ce < colEntries.length; ce++) {
+            const colIdx = Number(colEntries[ce][0]);
+            const val = colEntries[ce][1];
+            if (typeof val === "string" && val.startsWith("=")) {
+              existingRowVals[colIdx - 1] = "";
+              formulasInRow.push({ col: colIdx, formula: val });
+            } else {
+              existingRowVals[colIdx - 1] = val;
+            }
+          }
+
+          // Auto-update timestamp
+          if (updatedColName) {
+            const uHeader = headerMap.find(h => h.name === updatedColName);
+            if (uHeader && (assignedColValues[uHeader.colIndex] === undefined || assignedColValues[uHeader.colIndex] === "")) {
+              existingRowVals[uHeader.colIndex - 1] = nowIso;
+            }
+          }
+
+          sheet.getRange(targetRow, 1, 1, lastCol).setValues([existingRowVals]);
+          for (let f = 0; f < formulasInRow.length; f++) {
+            sheet.getRange(targetRow, formulasInRow[f].col).setFormula(formulasInRow[f].formula);
+          }
+
+          if (!updatedRowNumbers.includes(targetRow)) {
+            updatedRowNumbers.push(targetRow);
+          }
+        }
+      } else {
+        // === INSERT NEW ROW ===
+        const newRowNum = nextInsertRow;
+        nextInsertRow++;
+
+        // Auto-populate UID if column exists in sheet
+        if (idColName) {
+          const idHeader = headerMap.find(h => h.name === idColName);
+          if (idHeader) {
+            let idVal = assignedColValues[idHeader.colIndex];
+            if (idVal === undefined || idVal === null || idVal === "") {
+              idVal = Utilities.getUuid();
+              assignedColValues[idHeader.colIndex] = idVal;
+            }
+            assignedIds.push(idVal);
+          }
+        }
+
+        // Auto-populate timestamps
+        if (createdColName) {
+          const createdHeader = headerMap.find(h => h.name === createdColName);
+          if (createdHeader) {
+            if (assignedColValues[createdHeader.colIndex] === undefined || assignedColValues[createdHeader.colIndex] === "") {
+              assignedColValues[createdHeader.colIndex] = nowIso;
+            }
+          }
+        }
+        if (updatedColName) {
+          const updatedHeader = headerMap.find(h => h.name === updatedColName);
+          if (updatedHeader) {
+            if (assignedColValues[updatedHeader.colIndex] === undefined || assignedColValues[updatedHeader.colIndex] === "") {
+              assignedColValues[updatedHeader.colIndex] = nowIso;
+            }
+          }
+        }
+
+        rowsToInsert.push({
+          rowNumber: newRowNum,
+          assignedColValues: assignedColValues
+        });
+
+        insertedRowNumbers.push(newRowNum);
+
+        // Update in-memory index so subsequent batch items with same key update this new row
+        if (upsertHeader && targetKeyValue !== undefined && targetKeyValue !== null && String(targetKeyValue).trim() !== "") {
+          const lookupKey = String(targetKeyValue).trim().toLowerCase();
+          if (!keyToRowsMap.has(lookupKey)) {
+            keyToRowsMap.set(lookupKey, []);
+          }
+          keyToRowsMap.get(lookupKey).push(newRowNum);
         }
       }
-      allValues.push(rowValues);
     }
 
-    // Batch insert values
-    sheet.getRange(startRow, 1, numRows, lastCol).setValues(allValues);
+    // Batch insert any new rows
+    if (rowsToInsert.length > 0) {
+      const startInsertRow = rowsToInsert[0].rowNumber;
+      const numNewRows = rowsToInsert.length;
 
-    // Set any formula cells
-    for (let f = 0; f < formulasToSet.length; f++) {
-      const item = formulasToSet[f];
-      sheet.getRange(item.row, item.col).setFormula(item.formula);
+      if (startInsertRow + numNewRows - 1 > sheet.getMaxRows()) {
+        sheet.insertRowsAfter(sheet.getMaxRows(), (startInsertRow + numNewRows - 1) - sheet.getMaxRows());
+      }
+
+      const allValues = [];
+      const formulasToSet = [];
+
+      for (let i = 0; i < numNewRows; i++) {
+        const item = rowsToInsert[i];
+        const rowValues = [];
+        for (let c = 1; c <= lastCol; c++) {
+          const val = item.assignedColValues[c] !== undefined ? item.assignedColValues[c] : "";
+          if (typeof val === "string" && val.startsWith("=")) {
+            rowValues.push("");
+            formulasToSet.push({ row: item.rowNumber, col: c, formula: val });
+          } else {
+            rowValues.push(val);
+          }
+        }
+        allValues.push(rowValues);
+      }
+
+      sheet.getRange(startInsertRow, 1, numNewRows, lastCol).setValues(allValues);
+      for (let f = 0; f < formulasToSet.length; f++) {
+        sheet.getRange(formulasToSet[f].row, formulasToSet[f].col).setFormula(formulasToSet[f].formula);
+      }
     }
 
     SpreadsheetApp.flush();
 
     const matchedList = Object.keys(matchedFieldsSet);
     const ignoredList = Object.keys(ignoredFieldsSet);
+    const totalUpdated = updatedRowNumbers.length;
+    const totalInserted = insertedRowNumbers.length;
+    const allRowNumbers = updatedRowNumbers.concat(insertedRowNumbers);
+
+    let message = "";
+    if (upsertHeader) {
+      message = "Upsert complete: " + totalUpdated + " row(s) updated, " + totalInserted + " row(s) inserted into '" + finalSheetName + "' (key: '" + upsertHeader.name + "').";
+    } else {
+      message = "Successfully inserted " + totalInserted + " row(s) into '" + finalSheetName + "'.";
+    }
+    if (addedColumns.length > 0) {
+      message += " Added columns: " + addedColumns.join(", ") + ".";
+    }
+    if (ignoredList.length > 0) {
+      message += " Ignored unmatching fields: " + ignoredList.join(", ") + ".";
+    }
 
     return {
       success: true,
       sheetName: finalSheetName,
-      insertedRows: numRows,
-      rowNumbers: rowNumbers,
+      upsertKey: upsertHeader ? upsertHeader.name : null,
+      rowsUpdated: totalUpdated,
+      rowsInserted: totalInserted,
+      totalProcessed: rowsList.length,
+      updatedRowNumbers: updatedRowNumbers,
+      insertedRowNumbers: insertedRowNumbers,
+      rowNumbers: allRowNumbers,
       assignedIds: assignedIds.length > 0 ? assignedIds : undefined,
       matchedFields: matchedList,
       ignoredFields: ignoredList,
       addedColumns: addedColumns,
       updateSchema: updateSchema,
-      message: "Successfully inserted " + numRows + " row(s) into '" + finalSheetName + "'." +
-        (addedColumns.length > 0 ? " Added columns: " + addedColumns.join(", ") + "." : "") +
-        (ignoredList.length > 0 ? " Ignored unmatching fields: " + ignoredList.join(", ") + "." : "")
+      message: message
     };
   } finally {
     lock.releaseLock();
@@ -2707,13 +2841,15 @@ Content-Type: application/json
     }
   }
 }</pre>
+    </div>
+
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <h3 style="margin-top: 0; font-size: 16px;">Web Service / Webhook (Outside MCP)</h3>
         <span class="badge badge-green">Programmatic Input</span>
       </div>
-      <p style="font-size: 14px; color: #cbd5e1;">Submit arbitrary JSON payloads directly to any sheet tab via standard HTTP POST/GET. Automatically maps keys to sheet columns, with an optional flag to auto-expand the schema:</p>
-      <pre>POST /exec?action=webhook&sheetName=Companies
+      <p style="font-size: 14px; color: #cbd5e1;">Submit arbitrary JSON payloads directly to any sheet tab via standard HTTP POST/GET. Automatically maps keys to sheet columns, with optional schema expansion and upserting:</p>
+      <pre>POST /exec?action=webhook&sheetName=Companies&upsertKey=Name
 Content-Type: application/json
 
 {
@@ -2721,11 +2857,12 @@ Content-Type: application/json
   "Industry": "Technology",
   "Website": "https://acme.example.com"
 }</pre>
-      <p style="font-size: 13px; color: #94a3b8; margin: 8px 0 4px 0;"><strong>Schema Matching Behavior:</strong></p>
+      <p style="font-size: 13px; color: #94a3b8; margin: 8px 0 4px 0;"><strong>Matching, Upsert & Schema Behavior:</strong></p>
       <ul style="font-size: 13px; color: #cbd5e1; margin-top: 4px; padding-left: 20px;">
-        <li><strong>Default (<code>updateSchema=false</code>):</strong> Matches input keys against existing column headers (case-insensitive & trimmed). Any unmatching keys in your JSON object are discarded.</li>
+        <li><strong>Default Insert:</strong> By default, matches payload keys to column headers and appends a new row. Any unmatching keys in your JSON object are discarded.</li>
+        <li><strong>Optional Upsert (<code>upsertKey=column</code>):</strong> Pass <code>upsertKey=Email</code> (or <code>ID</code>, <code>Name</code>, etc.). If a row with a matching value already exists, it is <strong>updated</strong> in place and sets <code>_updated_at</code>; if no match is found, a new row is appended.</li>
         <li><strong>Auto-Add Missing Columns (<code>updateSchema=true</code>):</strong> Pass <code>updateSchema=true</code> in the URL query or payload body. Any new keys in your JSON object will be automatically created as new column headers in the sheet!</li>
-        <li><strong>Batch Submissions:</strong> Submit a JSON array <code>[{...}, {...}]</code> to insert multiple rows in a single batch.</li>
+        <li><strong>Batch Submissions:</strong> Submit a JSON array <code>[{...}, {...}]</code> to insert/upsert multiple rows in a single batch.</li>
       </ul>
     </div>
 
@@ -3947,8 +4084,9 @@ function menuShowWebhookGuide() {
     <h3>1. Webhook Endpoint</h3>
     <pre>${webhookUrl}</pre>
 
-    <h3>2. How Schema Matching Works</h3>
-    <p><strong>Default (unmatching fields discarded):</strong> Keys matching existing sheet columns are inserted. Any unmatching keys in your JSON object are thrown out automatically.</p>
+    <h3>2. How Schema Matching & Upsert Works</h3>
+    <p><strong>Default Insert:</strong> Keys matching existing sheet columns are appended as a new row. Any unmatching keys in your JSON object are thrown out automatically.</p>
+    <p><strong>Optional Upsert (<code>&upsertKey=column</code>):</strong> Pass a key name (e.g. <code>Email</code>, <code>id</code>, <code>Name</code>). If a row with a matching value already exists, it is <strong>updated</strong> in place and updates <code>_updated_at</code>; if no match exists, a new row is appended.</p>
     <p><strong>Auto-expand Schema (<code>updateSchema=true</code>):</strong> Add <code>&updateSchema=true</code> to your URL or payload. Any keys not currently in the sheet will be automatically appended as new columns to the header row!</p>
 
     <h3>3. Example: Submit a Single Record (curl)</h3>
@@ -3960,7 +4098,16 @@ ${authHeader}  -d '{
     "Notes": "New lead from website"
   }'</pre>
 
-    <h3>4. Example: Auto-Add Missing Columns (<code>updateSchema=true</code>)</h3>
+    <h3>4. Example: Optional Upsert (Update or Insert)</h3>
+    <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1&upsertKey=Email${authQuery}" \\
+  -H "Content-Type: application/json" \\
+${authHeader}  -d '{
+    "Email": "jane@example.com",
+    "Status": "Active Client",
+    "Notes": "Updated contact record"
+  }'</pre>
+
+    <h3>5. Example: Auto-Add Missing Columns (<code>updateSchema=true</code>)</h3>
     <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1&updateSchema=true${authQuery}" \\
   -H "Content-Type: application/json" \\
 ${authHeader}  -d '{
@@ -3969,18 +4116,18 @@ ${authHeader}  -d '{
     "New Custom Field": "Automatically creates this column!"
   }'</pre>
 
-    <h3>5. Example: Batch Array Submission</h3>
-    <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1${authQuery}" \\
+    <h3>6. Example: Batch Array Submission</h3>
+    <pre>curl -X POST "${webappUrl}?action=webhook&sheetName=Sheet1&upsertKey=Email${authQuery}" \\
   -H "Content-Type: application/json" \\
 ${authHeader}  -d '[
-    { "Name": "Alice", "Role": "Admin" },
-    { "Name": "Bob", "Role": "Editor" }
+    { "Email": "alice@example.com", "Role": "Admin" },
+    { "Email": "bob@example.com", "Role": "Editor" }
   ]'</pre>
 
     <button class="btn btn-close" onclick="google.script.host.close()">Close</button>
   `;
 
-  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(640).setHeight(560);
+  const htmlOutput = HtmlService.createHtmlOutput(html).setWidth(640).setHeight(620);
   ui.showModalDialog(htmlOutput, "🔗 Webhook URL & Payload Guide");
 }
 

@@ -175,11 +175,17 @@ You can submit JSON payloads directly to your spreadsheet from external services
 
 *(If your deployment has an API key configured, pass `?apiKey=YOUR_KEY` or header `x-api-key: YOUR_KEY` or `Authorization: Bearer YOUR_KEY`)*
 
-### 2. Schema Matching & Dynamic Schema Updates
+### 2. Schema Matching, Upsert & Schema Updates
 
-- **Default (`updateSchema=false`)**:
+- **Default Insert**:
   The service inspects the sheet's existing header row. Any keys in your JSON payload matching an existing column (exact, case-insensitive, or slug e.g. `first_name` matching `First Name`) are inserted.
   **Any unmatching keys in your JSON object are thrown out (discarded).**
+
+- **Optional Upsert (`upsertKey=column`)**:
+  Pass `upsertKey=Email` (or `ID`, `username`, `uid`, etc.) in query parameters or payload body.
+  - If a row with a matching value in that column already exists, it is **updated in place** (preserving other unmentioned columns in that row and updating `_updated_at`).
+  - If no row matches, a new row is appended (auto-generating `_uid` and timestamps).
+  - Passing an upsert key is completely optional—omitting it preserves default append behavior.
 
 - **Auto-Add Missing Columns (`updateSchema=true`)**:
   Include `&updateSchema=true` in the URL query parameters or `"updateSchema": true` in the JSON body.
@@ -199,6 +205,18 @@ curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&shee
   }'
 ```
 
+#### Optional Upsert (Update Existing Row or Add New)
+```bash
+curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&upsertKey=Email" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Email": "jane@example.com",
+    "Company": "Acme Corp (Updated)",
+    "Status": "Active"
+  }'
+```
+*If a row with `Email = jane@example.com` already exists, it updates `Company`, `Status`, and `_updated_at`. Otherwise, appends a new row.*
+
 #### Auto-Expanding Schema (`updateSchema=true`)
 ```bash
 curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&updateSchema=true" \
@@ -211,13 +229,13 @@ curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&shee
 ```
 *If `LinkedIn` does not exist in the sheet, a new `LinkedIn` column is created in row 1.*
 
-#### Batch Submission (Array of Objects)
+#### Batch Submission (Array of Objects with Upsert)
 ```bash
-curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Events" \
+curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&upsertKey=Email" \
   -H "Content-Type: application/json" \
   -d '[
-    { "Event": "signup", "User": "alice" },
-    { "Event": "login", "User": "bob" }
+    { "Email": "alice@example.com", "Role": "Admin" },
+    { "Email": "bob@example.com", "Role": "Editor" }
   ]'
 ```
 
@@ -226,14 +244,19 @@ curl -X POST "https://gas-proxy.<subdomain>.workers.dev/exec?action=webhook&shee
 {
   "success": true,
   "sheetName": "Leads",
-  "insertedRows": 1,
-  "rowNumbers": [42],
+  "upsertKey": "Email",
+  "rowsUpdated": 1,
+  "rowsInserted": 1,
+  "totalProcessed": 2,
+  "updatedRowNumbers": [12],
+  "insertedRowNumbers": [43],
+  "rowNumbers": [12, 43],
   "assignedIds": ["c7a40b3e-79db-48bc-9f20-b47e5bda1482"],
-  "matchedFields": ["Name", "Email", "Company"],
-  "ignoredFields": ["TemporaryField"],
+  "matchedFields": ["Email", "Role"],
+  "ignoredFields": [],
   "addedColumns": [],
   "updateSchema": false,
-  "message": "Successfully inserted 1 row(s) into 'Leads'. Ignored unmatching fields: TemporaryField."
+  "message": "Upsert complete: 1 row(s) updated, 1 row(s) inserted into 'Leads' (key: 'Email')."
 }
 ```
 

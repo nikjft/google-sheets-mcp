@@ -57,11 +57,14 @@ Send POST requests to your sheets directly through the proxy without MCP connect
 # Direct webhook path (forwards to default or specified deployment /exec?action=webhook):
 POST https://gas-proxy.<your-subdomain>.workers.dev/webhook?sheetName=Leads
 
-# Or with deployment ID:
-POST https://gas-proxy.<your-subdomain>.workers.dev/<DEPLOYMENT_ID>/webhook?sheetName=Leads
+# Optional Upsert (update matching row or insert if new):
+POST https://gas-proxy.<your-subdomain>.workers.dev/webhook?sheetName=Leads&upsertKey=Email
 
-# Or query parameter on /exec:
-POST https://gas-proxy.<your-subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&updateSchema=true
+# With deployment ID:
+POST https://gas-proxy.<your-subdomain>.workers.dev/<DEPLOYMENT_ID>/webhook?sheetName=Leads&upsertKey=Email
+
+# With dynamic schema expansion:
+POST https://gas-proxy.<your-subdomain>.workers.dev/exec?action=webhook&sheetName=Leads&upsertKey=Email&updateSchema=true
 ```
 
 ## Local Development
